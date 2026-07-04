@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GETC 海外研修 価格計算ツール</title>
+<style>
+:root{
+  --ink:#1c2733; --sub:#5b6b7b; --line:#d8dee6; --bg:#eef1f5; --card:#ffffff;
+  --accent:#0f4c81; --accent-soft:#e7eef6;
+  --ok:#1a7f4b; --warn-bg:#fff6de; --warn:#8a6d00; --danger-bg:#fdecec; --danger:#b3261e;
+  --mono:"SF Mono","Consolas","Menlo",monospace;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;font-family:"Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic UI","Meiryo",sans-serif;
+  background:var(--bg);color:var(--ink);font-size:13px;line-height:1.55}
+
+/* ---- top bar ---- */
+#topbar{position:sticky;top:0;z-index:50;background:var(--ink);color:#fff;
+  display:flex;align-items:center;gap:16px;padding:8px 16px;flex-wrap:wrap}
+#topbar .brand{font-weight:700;font-size:14px;letter-spacing:.04em;white-space:nowrap}
+#topbar .brand small{display:block;font-weight:400;font-size:10px;opacity:.7;letter-spacing:.12em}
+#sumbar{display:flex;gap:2px;flex:1;min-width:320px;flex-wrap:wrap}
+.sum-cell{background:rgba(255,255,255,.08);padding:4px 12px;border-radius:4px;min-width:104px}
+.sum-cell .lbl{font-size:10px;opacity:.75;letter-spacing:.06em}
+.sum-cell .val{font-family:var(--mono);font-size:15px;font-weight:600;white-space:nowrap}
+.sum-cell .man{font-family:var(--mono);font-size:10px;opacity:.75}
+.sum-cell.gp-ok .val{color:#7fe0a8}
+.sum-cell.gp-warn .val{color:#ffd66b}
+.sum-cell.gp-bad .val{color:#ff8f8a}
+#topbar .actions{display:flex;gap:6px}
+#topbar button{background:rgba(255,255,255,.14);color:#fff;border:1px solid rgba(255,255,255,.25);
+  border-radius:4px;padding:5px 10px;font-size:11px;cursor:pointer}
+#topbar button:hover{background:rgba(255,255,255,.25)}
+
+/* ---- pattern bar ---- */
+#patbar{position:sticky;top:52px;z-index:40;background:#fff;border-bottom:2px solid var(--line);
+  display:flex;align-items:center;gap:6px;padding:6px 16px;overflow-x:auto}
+#patbar .ptab{border:1px solid var(--line);background:#f5f7fa;border-radius:6px 6px 0 0;
+  padding:6px 14px;cursor:pointer;white-space:nowrap;font-size:12px;color:var(--sub)}
+#patbar .ptab.active{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:700}
+#patbar .pbtn{border:1px dashed var(--line);background:#fff;border-radius:6px;padding:6px 10px;
+  cursor:pointer;font-size:11px;color:var(--accent);white-space:nowrap}
+#patbar .pbtn:hover{background:var(--accent-soft)}
+
+/* ---- layout ---- */
+#layout{display:flex;gap:0;align-items:flex-start}
+#nav{position:sticky;top:100px;width:196px;flex-shrink:0;padding:14px 8px 14px 14px;max-height:calc(100vh - 110px);overflow-y:auto}
+#nav a{display:block;padding:6px 10px;border-radius:5px;color:var(--sub);text-decoration:none;font-size:12px;border-left:3px solid transparent}
+#nav a:hover{background:#e3e9f0;color:var(--ink)}
+#nav a .no{display:inline-block;width:20px;font-family:var(--mono);font-size:10px;color:#9aa8b6}
+#main{flex:1;min-width:0;padding:14px 16px 80px 8px}
+
+/* ---- cards ---- */
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;margin-bottom:16px;overflow:hidden}
+.card>h2{margin:0;padding:10px 14px;font-size:13px;background:linear-gradient(to right,var(--accent-soft),#fff);
+  border-bottom:1px solid var(--line);color:var(--accent);display:flex;align-items:center;gap:10px}
+.card>h2 .secno{font-family:var(--mono);font-size:10px;background:var(--accent);color:#fff;border-radius:3px;padding:1px 6px}
+.card .body{padding:12px 14px}
+.card h3{font-size:12px;margin:14px 0 6px;color:var(--ink);border-left:3px solid var(--accent);padding-left:8px}
+.card h3:first-child{margin-top:0}
+.hint{font-size:11px;color:var(--sub);margin:2px 0 8px}
+
+/* ---- form grid ---- */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px 12px}
+.f label{display:block;font-size:10px;color:var(--sub);margin-bottom:2px;letter-spacing:.03em}
+.f input,.f select,.f textarea, td input, td select{
+  width:100%;border:1px solid var(--line);border-radius:4px;padding:5px 7px;font-size:12px;
+  font-family:inherit;background:#fff;color:var(--ink)}
+td input.num, .f input.num{font-family:var(--mono);text-align:right}
+.f input:focus,.f select:focus,td input:focus,td select:focus{outline:2px solid #9dbfe0;outline-offset:0;border-color:var(--accent)}
+.f .comp, td .comp{font-family:var(--mono);text-align:right;background:#f2f5f8;border:1px solid var(--line);
+  border-radius:4px;padding:5px 7px;font-size:12px;min-height:27px;white-space:nowrap}
+.f .comp.big{font-size:14px;font-weight:700}
+
+/* ---- tables ---- */
+.tw{overflow-x:auto;border:1px solid var(--line);border-radius:6px}
+table.tbl{border-collapse:collapse;width:100%;font-size:12px}
+.tbl th{background:#f2f5f8;color:var(--sub);font-weight:600;font-size:10px;letter-spacing:.03em;
+  padding:5px 6px;border-bottom:1px solid var(--line);white-space:nowrap;text-align:left}
+.tbl td{padding:3px 4px;border-bottom:1px solid #edf0f4;vertical-align:middle}
+.tbl tr:last-child td{border-bottom:none}
+.tbl td.r{text-align:right;font-family:var(--mono);white-space:nowrap}
+.tbl td .comp{padding:4px 5px;min-height:25px}
+.tbl input,.tbl select{min-width:60px}
+.tbl input.w-s{min-width:52px;width:60px}
+.tbl input.w-m{min-width:90px;width:100px}
+.tbl input.w-l{min-width:130px;width:150px}
+.tbl select.w-s{min-width:64px;width:72px}
+.tbl select.w-m{min-width:84px;width:92px}
+.addrow{margin-top:8px;border:1px dashed var(--accent);background:var(--accent-soft);color:var(--accent);
+  border-radius:5px;padding:5px 12px;font-size:11px;cursor:pointer}
+.addrow:hover{background:#d9e6f3}
+.del{border:none;background:none;color:#c1666b;cursor:pointer;font-size:14px;padding:2px 6px}
+.del:hover{color:var(--danger)}
+
+/* ---- switches, badges ---- */
+.sw{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--sub);cursor:pointer;white-space:nowrap}
+.sw input{width:auto}
+.badge{display:inline-block;font-size:10px;border-radius:3px;padding:1px 6px;white-space:nowrap}
+.badge.warn{background:var(--warn-bg);color:var(--warn);border:1px solid #e6d089}
+.badge.bad{background:var(--danger-bg);color:var(--danger);border:1px solid #efb2ae}
+.badge.ok{background:#e5f5ec;color:var(--ok);border:1px solid #b3dfc6}
+.gp-ok{color:var(--ok)} .gp-warn{background:var(--warn-bg);color:var(--warn)} .gp-bad{background:var(--danger-bg);color:var(--danger)}
+.off{opacity:.45}
+.money{font-family:var(--mono)}
+.man{font-size:10px;color:var(--sub);font-family:var(--mono)}
+
+/* ---- freee / summary tables ---- */
+.tbl.sumtbl td{padding:6px}
+.tbl.sumtbl tfoot td{background:#f2f5f8;font-weight:700;border-top:2px solid var(--line)}
+.notebox{background:var(--warn-bg);border:1px solid #e6d089;color:var(--warn);border-radius:6px;padding:8px 12px;font-size:12px;margin-top:10px}
+.alertbox{background:var(--danger-bg);border:1px solid #efb2ae;color:var(--danger);border-radius:6px;padding:8px 12px;font-size:12px;margin-top:10px}
+
+details.help{background:#f6f8fb;border:1px solid var(--line);border-radius:6px;padding:8px 12px;margin:8px 0;font-size:12px}
+details.help summary{cursor:pointer;color:var(--accent);font-weight:600;font-size:12px}
+details.help ul{margin:6px 0;padding-left:18px}
+details.help li{margin:2px 0}
+
+@media (max-width:860px){
+  #nav{display:none}
+  #main{padding:12px}
+}
+</style>
+</head>
+<body>
+<div id="topbar">
+  <div class="brand">GETC 海外研修 価格計算<small>OVERSEAS TRAINING QUOTATION</small></div>
+  <div id="sumbar"></div>
+  <div class="actions">
+    <button data-act="export">JSON書き出し</button>
+    <button data-act="import">JSON読み込み</button>
+    <button data-act="reset">サンプルに戻す</button>
+  </div>
+</div>
+<div id="patbar"></div>
+<div id="layout">
+  <nav id="nav"></nav>
+  <main id="main"></main>
+</div>
+<input type="file" id="filein" accept=".json" style="display:none">
+<script src="app.js"></script>
+</body>
+</html>
