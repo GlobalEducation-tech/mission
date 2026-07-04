@@ -94,7 +94,7 @@ function defaultState(){
 /* ---------- persistence (複数案件対応) ---------- */
 const LSKEY = "getc-training-calc-v2";
 const LSKEY_V1 = "getc-training-calc-v1";
-let ROOT;   // { cases:[case,…], activeId, gasUrl }
+let ROOT;   // { cases:[case,…], activeId }
 let S;      // 表示中の案件(case) = { id, updatedAt, basic, fx, taxRate, patterns, active }
 function newCase(projectName){
   const c = defaultState();
@@ -111,7 +111,6 @@ function load(){
     const raw = localStorage.getItem(LSKEY);
     if (raw){ ROOT = JSON.parse(raw);
       if (!ROOT.cases || !ROOT.cases.length) throw 0;
-      if (ROOT.gasUrl == null) ROOT.gasUrl = "";
       setActiveCase(ROOT.activeId); return; }
   } catch(e){}
   try {
@@ -120,11 +119,11 @@ function load(){
     if (raw){ const old = JSON.parse(raw);
       if (old.patterns && old.basic){
         old.id = uid(); old.updatedAt = Date.now();
-        ROOT = { cases:[old], activeId: old.id, gasUrl:"" };
+        ROOT = { cases:[old], activeId: old.id };
         setActiveCase(old.id); return; } }
   } catch(e){}
   const c = newCase();
-  ROOT = { cases:[c], activeId: c.id, gasUrl:"" };
+  ROOT = { cases:[c], activeId: c.id };
   S = c;
 }
 let saveTimer = null;
@@ -143,9 +142,6 @@ function resolve(path){
   const parts = path.split(".");
   const head = parts.shift();
   if (head === "taxRate") return { obj: S, key: "taxRate" };
-  if (head === "root") { let obj = ROOT; const ps = parts;
-    while (ps.length > 1) obj = obj[ps.shift()];
-    return { obj, key: ps[0] }; }
   if (head === "patName") return { obj: activePat(), key: "name" };
   if (head === "patComment") return { obj: activePat(), key: "comment" };
   let obj;
@@ -471,7 +467,7 @@ const NAV = [
   ["consult","コンサルティング"],["partner","現地提携先費用"],["guest","ゲストスピーカー/企業訪問"],
   ["ma","ミッション企業手配"],["buddy","バディ手配"],["hotel","ホテル"],["flight","航空券"],
   ["attend","アテンド費用"],["mgmt","企画・管理費"],["tax","課税・粗利サマリー"],
-  ["freee","freee転記用サマリー"],["compare","パターン比較"],["cloud","クラウド保存"]
+  ["freee","freee転記用サマリー"],["compare","パターン比較"]
 ];
 
 function renderNav(){
@@ -510,29 +506,6 @@ function renderCasebar(){
     (ROOT.cases.length > 1 ? `<button data-act="delCase">案件削除</button>` : "");
 }
 
-/* --- クラウド保存(スプレッドシート連携) --- */
-let CLOUD_LIST = null;   // 一覧取得結果
-let CLOUD_MSG = "";
-function secCloud(){
-  const listRows = (CLOUD_LIST || []).map(c =>
-    `<tr class="cloudrow"><td>${esc(c.name||"(無題)")}</td><td>${esc(c.client||"—")}</td>
-     <td>${c.updatedAt ? new Date(c.updatedAt).toLocaleString("ja-JP") : "—"}</td>
-     <td><button class="addrow" data-act="cloudLoad" data-id="${esc(c.id)}">この案件を開く</button></td></tr>`).join("");
-  return `<section class="card" id="sec-cloud">${secH(16,"クラウド保存(スプレッドシート連携)")}
-  <div class="body">
-    <div class="grid">
-      ${F("Apps Script WebアプリURL", inp("root.gasUrl", ROOT.gasUrl, "", "https://script.google.com/macros/s/…/exec"))}
-    </div>
-    <p class="hint">保存すると、指定スプレッドシートに「顧客名_年度」のタブが自動で作成・更新されます(年度は渡航開始日から4月始まりで判定)。スプレッドシートは閲覧専用で共有し、書き込みはこのツール経由でのみ行います。URLが未設定でも、ブラウザ保存・JSON書き出し・Excel書き出しは通常どおり使えます。組織のGoogle Workspace設定で外部公開デプロイができない場合は、上部の「Excel書き出し」で同じ内容(顧客名_年度.xlsx)をダウンロードして共有ドライブに保管する運用をおすすめします。</p>
-    <button class="addrow" data-act="cloudSave">☁ この案件をクラウドに保存</button>
-    <button class="addrow" data-act="cloudList">↻ クラウドの案件一覧を取得</button>
-    ${CLOUD_MSG ? `<div class="cloudmsg">${esc(CLOUD_MSG)}</div>` : ""}
-    ${CLOUD_LIST ? `<div class="tw" style="margin-top:10px"><table class="tbl sumtbl">
-      <tr><th>案件名</th><th>顧客名</th><th>更新日時</th><th></th></tr>
-      ${listRows || `<tr><td colspan="4">保存済みの案件はまだありません。</td></tr>`}
-    </table></div>` : ""}
-  </div></section>`;
-}
 /* 年度(4月始まり)とタブ名 */
 function fiscalLabel(){
   let d = S.basic.startDate ? new Date(S.basic.startDate) : new Date();
@@ -578,12 +551,6 @@ function patternRows(p){
 }
 const padRows = rows => { const w = Math.max(...rows.map(r => r.length), 1);
   return rows.map(r => { while (r.length < w) r.push(""); return r.map(v => v == null ? "" : v); }); };
-/* スプレッドシートのタブに書き出す内容(全パターン結合) */
-function buildSheetRows(){
-  const rows = caseInfoRows(); rows.push([]);
-  for (const p of S.patterns){ rows.push(...patternRows(p)); rows.push([]); }
-  return padRows(rows);
-}
 /* Excel書き出し: 顧客名_年度.xlsx(案件情報シート + パターンごとのシート) */
 function exportExcel(){
   if (typeof XLSX === "undefined"){
@@ -622,52 +589,6 @@ function exportExcel(){
 
   XLSX.writeFile(wb, tabNameFor() + ".xlsx");
 }
-async function cloudSave(){
-  if (!ROOT.gasUrl){ CLOUD_MSG = "先にApps Script WebアプリURLを入力してください。"; render(); return; }
-  CLOUD_MSG = "保存中…"; render();
-  try {
-    const res = await fetch(ROOT.gasUrl, { method:"POST",
-      headers:{ "Content-Type":"text/plain" },
-      body: JSON.stringify({ action:"save", id:S.id, name:S.basic.project,
-        client:S.basic.client, tabName: tabNameFor(),
-        json: JSON.stringify(S), rows: buildSheetRows() }) });
-    const j = await res.json();
-    CLOUD_MSG = j.ok ? "保存しました → タブ「" + (j.tabName || tabNameFor()) + "」(" + new Date().toLocaleString("ja-JP") + ")"
-                     : "保存に失敗: " + (j.error||"");
-  } catch(err){ CLOUD_MSG = "通信エラー: " + err.message + "(URLとデプロイ設定を確認してください)"; }
-  render();
-}
-async function cloudList(){
-  if (!ROOT.gasUrl){ CLOUD_MSG = "先にApps Script WebアプリURLを入力してください。"; render(); return; }
-  CLOUD_MSG = "一覧を取得中…"; render();
-  try {
-    const res = await fetch(ROOT.gasUrl + "?action=list");
-    const j = await res.json();
-    if (j.ok){ CLOUD_LIST = j.cases; CLOUD_MSG = j.cases.length + " 件の案件が見つかりました。"; }
-    else CLOUD_MSG = "取得に失敗: " + (j.error||"");
-  } catch(err){ CLOUD_MSG = "通信エラー: " + err.message; }
-  render();
-}
-async function cloudLoad(id){
-  CLOUD_MSG = "読み込み中…"; render();
-  try {
-    const res = await fetch(ROOT.gasUrl + "?action=load&id=" + encodeURIComponent(id));
-    const j = await res.json();
-    if (!j.ok) throw new Error(j.error || "not found");
-    const c = JSON.parse(j.json);
-    if (!c.basic || !c.patterns) throw new Error("形式が違います");
-    const i = ROOT.cases.findIndex(x => x.id === c.id);
-    if (i >= 0){
-      if (!confirm(`案件「${c.basic.project}」はこのブラウザにも存在します。クラウドの内容で上書きしますか?`)){ CLOUD_MSG = ""; render(); return; }
-      ROOT.cases[i] = c;
-    } else ROOT.cases.push(c);
-    setActiveCase(c.id);
-    if (!S.patterns.find(p => p.id === S.active)) S.active = S.patterns[0].id;
-    CLOUD_MSG = "読み込みました。"; render(); window.scrollTo({top:0});
-  } catch(err){ CLOUD_MSG = "読み込みに失敗: " + err.message; render(); }
-}
-
-
 function secBasic(){
   const b = S.basic, p = activePat();
   const grp = num(b.groups);
@@ -1132,7 +1053,7 @@ function render(){
     `<datalist id="curlist">${CURRENCIES.map(c=>`<option value="${c}">`).join("")}</datalist>` +
     secBasic() + secFx() + secPre(C) + secConsult(C) + secPartner(C) + secGuest(C) +
     secMa(C) + secBuddy(C) + secHotel(C) + secFlight(C) + secAttend(C) + secMgmt(C) +
-    secTax(C) + secFreee(C) + secCompare() + secCloud();
+    secTax(C) + secFreee(C) + secCompare();
 
   // フォーカス復元
   if (focusP){
@@ -1240,14 +1161,10 @@ document.addEventListener("click", e => {
 
   else if (act === "delCase"){
     if (ROOT.cases.length <= 1) return;
-    if (!confirm(`案件「${S.basic.project}」を削除しますか?\n(クラウドに保存済みの分は残ります)`)) return;
+    if (!confirm(`案件「${S.basic.project}」を削除しますか?\n(必要であれば先にJSONかExcelで書き出してください)`)) return;
     ROOT.cases = ROOT.cases.filter(c => c.id !== S.id);
     setActiveCase(ROOT.cases[0].id); render();
   }
-
-  else if (act === "cloudSave"){ cloudSave(); }
-  else if (act === "cloudList"){ cloudList(); }
-  else if (act === "cloudLoad"){ cloudLoad(btn.dataset.id); }
 
   else if (act === "excel"){ exportExcel(); }
 
