@@ -33,6 +33,15 @@ body{margin:0;font-family:"Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic
 #topbar button{background:rgba(255,255,255,.14);color:#fff;border:1px solid rgba(255,255,255,.25);
   border-radius:4px;padding:5px 10px;font-size:11px;cursor:pointer}
 #topbar button:hover{background:rgba(255,255,255,.25)}
+#casectl{display:flex;align-items:center;gap:5px}
+#casectl select{background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.3);
+  border-radius:4px;padding:5px 8px;font-size:12px;max-width:240px}
+#casectl select option{color:#1c2733}
+#casectl button{background:rgba(255,255,255,.14);color:#fff;border:1px solid rgba(255,255,255,.25);
+  border-radius:4px;padding:5px 9px;font-size:11px;cursor:pointer;white-space:nowrap}
+#casectl button:hover{background:rgba(255,255,255,.25)}
+.cloudrow td{padding:6px}
+.cloudmsg{font-size:12px;margin-top:8px;color:var(--sub)}
 
 /* ---- pattern bar ---- */
 #patbar{position:sticky;top:52px;z-index:40;background:#fff;border-bottom:2px solid var(--line);
@@ -127,6 +136,7 @@ details.help li{margin:2px 0}
 <body>
 <div id="topbar">
   <div class="brand">GETC 海外研修 価格計算<small>OVERSEAS TRAINING QUOTATION</small></div>
+  <div id="casectl"></div>
   <div id="sumbar"></div>
   <div class="actions">
     <button data-act="export">JSON書き出し</button>

@@ -15,6 +15,7 @@ const pct = n => isFinite(n) ? (n*100).toFixed(1) + "%" : "—";
 const gpCls = r => !isFinite(r) ? "" : r < .10 ? "gp-bad" : r < .20 ? "gp-warn" : "gp-ok";
 
 const TAXCATS = ["課税","非課税","不課税","対象外","未確認"];
+const FLIGHT_NOTE = "航空券は貴社直接手配、または旅行会社から貴社へ直接請求を想定しており、当社見積には含めておりません。";
 const CURRENCIES = ["SGD","USD","EUR","GBP","AUD","CAD","NZD","JPY"];
 const LTTYPES = ["GST","VAT","Sales Tax","その他","なし"];
 
@@ -67,7 +68,7 @@ function defaultPatternData(){
         sell:"", breakfast:"込み", taxSvc:"込み", cancel:"", taxCat:"不課税", note:"" },
         fxBlock("SGD",{ltRate:"9"}))
     ],
-    flight: { arrange:"未定", people:"16", unit:"", cost:"", taxCat:"課税", note:"" },
+    flight: { arrange:"GE見積に含める", people:"16", unit:"", cost:"", taxCat:"課税", note:"" },
     al: [ { id:uid(), person:"", days:"7", unit:"50000", cost:"", taxCat:"課税", note:"" } ],
     ad: [ { id:uid(), person:"", days:"2", unit:"50000", cost:"", taxCat:"課税", note:"" } ],
     mgmt: { ratePct:"15",
@@ -90,20 +91,49 @@ function defaultState(){
   };
 }
 
-/* ---------- persistence ---------- */
-const LSKEY = "getc-training-calc-v1";
-let S;
+/* ---------- persistence (複数案件対応) ---------- */
+const LSKEY = "getc-training-calc-v2";
+const LSKEY_V1 = "getc-training-calc-v1";
+let ROOT;   // { cases:[case,…], activeId, gasUrl }
+let S;      // 表示中の案件(case) = { id, updatedAt, basic, fx, taxRate, patterns, active }
+function newCase(projectName){
+  const c = defaultState();
+  c.id = uid(); c.updatedAt = Date.now();
+  if (projectName != null) c.basic.project = projectName;
+  return c;
+}
+function setActiveCase(id){
+  S = ROOT.cases.find(c => c.id === id) || ROOT.cases[0];
+  ROOT.activeId = S.id;
+}
 function load(){
   try {
     const raw = localStorage.getItem(LSKEY);
-    if (raw) { S = JSON.parse(raw); if (!S.patterns || !S.patterns.length) throw 0; return; }
+    if (raw){ ROOT = JSON.parse(raw);
+      if (!ROOT.cases || !ROOT.cases.length) throw 0;
+      if (ROOT.gasUrl == null) ROOT.gasUrl = "";
+      setActiveCase(ROOT.activeId); return; }
   } catch(e){}
-  S = defaultState();
+  try {
+    // 旧バージョン(単一案件)からの引き継ぎ
+    const raw = localStorage.getItem(LSKEY_V1);
+    if (raw){ const old = JSON.parse(raw);
+      if (old.patterns && old.basic){
+        old.id = uid(); old.updatedAt = Date.now();
+        ROOT = { cases:[old], activeId: old.id, gasUrl:"" };
+        setActiveCase(old.id); return; } }
+  } catch(e){}
+  const c = newCase();
+  ROOT = { cases:[c], activeId: c.id, gasUrl:"" };
+  S = c;
 }
 let saveTimer = null;
 function save(){
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => { try{ localStorage.setItem(LSKEY, JSON.stringify(S)); }catch(e){} }, 300);
+  saveTimer = setTimeout(() => {
+    S.updatedAt = Date.now();
+    try{ localStorage.setItem(LSKEY, JSON.stringify(ROOT)); }catch(e){}
+  }, 300);
 }
 function activePat(){ return S.patterns.find(p => p.id === S.active) || S.patterns[0]; }
 
@@ -113,6 +143,9 @@ function resolve(path){
   const parts = path.split(".");
   const head = parts.shift();
   if (head === "taxRate") return { obj: S, key: "taxRate" };
+  if (head === "root") { let obj = ROOT; const ps = parts;
+    while (ps.length > 1) obj = obj[ps.shift()];
+    return { obj, key: ps[0] }; }
   if (head === "patName") return { obj: activePat(), key: "name" };
   if (head === "patComment") return { obj: activePat(), key: "comment" };
   let obj;
@@ -322,23 +355,65 @@ function computeAll(pd){
   const gpRate = total.sell ? total.gp / total.sell : NaN;
   const pp = num(S.basic.participants) || 1;
 
-  /* --- freee転記用明細 --- */
-  const mk = (label, c, note) => ({ label, ex: c.sell, tax: c.tax, inc: c.sell + c.tax,
-    taxCat: c.tax > 0 ? (c.taxable === c.sell ? "課税" : "混在") : "非課税等", note: note || "" });
+  /* --- freee転記用明細(項目ごと・単価×数量) ---
+     まとめない方針。現地提携先のメイン費用のみ1本に合算し、
+     ゲストスピーカー/企業訪問は行ごとに独立。 */
   const freee = [];
-  freee.push(mk("事前研修・オリエンテーション費", cat.pre));
-  freee.push(mk("コンサルティング費", cat.consult));
-  { const c = zero(); acc(c, cat.partner); acc(c, cat.guestPartner);
-    freee.push(mk("現地提携先プログラム費", c,
-      cat.guestPartner.sell ? "ゲストスピーカー/企業訪問(提携先経由)を含む" : "")); }
-  if (cat.guestDirect.sell || cat.guestDirect.cost)
-    freee.push(mk("ゲストスピーカー/企業訪問費(直接支払い)", cat.guestDirect));
-  freee.push(mk("ミッション企業手配費", cat.ma));
-  freee.push(mk("バディ手配費", cat.buddy));
-  freee.push(mk("ホテル費", cat.hotel));
-  { const c = zero(); acc(c, cat.al); acc(c, cat.ad); freee.push(mk("アテンド費", c)); }
-  freee.push(mk("企画・管理費", cat.mgmt));
-  if (fIncluded) freee.push(mk("航空券", cat.flight));
+  const L = (label, r, taxCat, opt={}) => freee.push({
+    label, taxCat,
+    unit: opt.unit ?? r.sell, qty: opt.qty ?? 1, qtyUnit: opt.qtyUnit ?? "式",
+    ex: r.sell, tax: r.tax, inc: r.sell + r.tax,
+    note: opt.note ?? "", excluded: false });
+
+  if (pd.pre.kickoff.on) L("キックオフ", R["pre-kickoff"], pd.pre.kickoff.taxCat, {note:"定額"});
+  if (pd.pre.orient.on)  L("出発前オリエンテーション", R["pre-orient"], pd.pre.orient.taxCat, {note:"定額"});
+  for (const row of pd.pre.rows)
+    L(`事前研修${row.name ? "(" + row.name + ")" : ""}`, R[row.id], row.taxCat,
+      { note: [row.lecturer && "講師:"+row.lecturer, num(row.times) ? "実施"+num(row.times)+"回" : ""].filter(Boolean).join(" / ") });
+
+  if (pd.cg.on) L(`コンサルティング${pd.cg.name ? "(" + pd.cg.name + ")" : ""}`, R["cg"], pd.cg.taxCat,
+      { unit: num(pd.cg.unit), qty: R["cg"].totalH, qtyUnit: "時間" });
+  for (const row of pd.cm)
+    L(`ミッション企業コンサルティング${row.company ? "(" + row.company + ")" : ""}`, R[row.id], row.taxCat,
+      { unit: num(row.unit), qty: R[row.id].totalH, qtyUnit: "時間" });
+
+  { const c = zero(); acc(c, cat.partner);
+    freee.push({ label: `現地提携先プログラム費(${pd.partner.name || "現地提携先"})`,
+      taxCat: c.tax > 0 ? "課税" : (pRows.length ? pRows[0][0].taxCat : "不課税"),
+      unit: c.sell, qty: 1, qtyUnit: "式", ex: c.sell, tax: c.tax, inc: c.sell + c.tax,
+      note: "プログラム・会場費/懇親会/交通費等を合算", excluded: false }); }
+
+  for (const row of pd.guests){ if (!row.on) continue;
+    L(`${row.type}${row.name ? "(" + row.name + ")" : ""}`, R[row.id], row.taxCat,
+      { note: row.payVia === "partner" ? "現地提携先経由" : "直接支払い" }); }
+
+  if (pd.ma.on) L(`ミッション企業手配費${pd.ma.company ? "(" + pd.ma.company + ")" : ""}`, R["ma"], pd.ma.taxCat);
+
+  if (pd.buddy.on){
+    L(`バディ手配費(現地稼働${pd.buddy.agency ? "・" + pd.buddy.agency : ""})`, R["buddy-local"], pd.buddy.taxCat,
+      { unit: num(pd.buddy.unit), qty: R["buddy-local"].totalH, qtyUnit: "時間" });
+    if (R["buddy-mtg"].sell)
+      L("バディ手配費(渡航前オンラインMTG)", R["buddy-mtg"], pd.buddy.taxCat,
+        { unit: num(pd.buddy.mtgUnit), qty: num(pd.buddy.mtgCnt), qtyUnit: "回" });
+  }
+
+  for (const row of pd.hotels){ if (!row.on) continue;
+    L(`ホテル費${row.name ? "(" + row.name + ")" : ""}`, R[row.id], row.taxCat,
+      { note: `${num(row.rooms)}室 × ${num(row.nights)}泊` }); }
+
+  for (const [key, rows, lab] of [["al", pd.al, "現地アテンド費"], ["ad", pd.ad, "国内アテンド費"]])
+    for (const row of rows)
+      L(`${lab}${row.person ? "(" + row.person + ")" : ""}`, R[row.id], row.taxCat,
+        { unit: num(row.unit), qty: num(row.days), qtyUnit: "日" });
+
+  L("企画・管理費", R["mgmt"], pd.mgmt.taxCat,
+    { note: `対象 ${fmt(R["mgmt"].base)}円 × ${num(pd.mgmt.ratePct)}%` });
+
+  if (fIncluded)
+    L("航空券", R["flight"], f.taxCat, { unit: num(f.unit), qty: num(f.people), qtyUnit: "名" });
+  else
+    freee.push({ label: "航空券", taxCat: "対象外", unit: null, qty: null, qtyUnit: "",
+      ex: 0, tax: 0, inc: 0, note: FLIGHT_NOTE, excluded: true });
 
   return {
     R, cat, freee,
@@ -396,7 +471,7 @@ const NAV = [
   ["consult","コンサルティング"],["partner","現地提携先費用"],["guest","ゲストスピーカー/企業訪問"],
   ["ma","ミッション企業手配"],["buddy","バディ手配"],["hotel","ホテル"],["flight","航空券"],
   ["attend","アテンド費用"],["mgmt","企画・管理費"],["tax","課税・粗利サマリー"],
-  ["freee","freee転記用サマリー"],["compare","パターン比較"]
+  ["freee","freee転記用サマリー"],["compare","パターン比較"],["cloud","クラウド保存"]
 ];
 
 function renderNav(){
@@ -425,7 +500,128 @@ function renderSumbar(C){
     cell("粗利率", pct(t.gpRate), "", g);
 }
 
-/* --- 1. 基本情報 --- */
+function renderCasebar(){
+  const opts = ROOT.cases.map(c =>
+    `<option value="${c.id}"${c.id===S.id?" selected":""}>${esc(c.basic.project||"(無題の案件)")}${c.basic.client?" / "+esc(c.basic.client):""}</option>`).join("");
+  document.getElementById("casectl").innerHTML =
+    `<select id="casesel" title="案件を切り替え">${opts}</select>
+     <button data-act="newCase">＋新規案件</button>
+     <button data-act="dupCase">案件複製</button>` +
+    (ROOT.cases.length > 1 ? `<button data-act="delCase">案件削除</button>` : "");
+}
+
+/* --- クラウド保存(スプレッドシート連携) --- */
+let CLOUD_LIST = null;   // 一覧取得結果
+let CLOUD_MSG = "";
+function secCloud(){
+  const listRows = (CLOUD_LIST || []).map(c =>
+    `<tr class="cloudrow"><td>${esc(c.name||"(無題)")}</td><td>${esc(c.client||"—")}</td>
+     <td>${c.updatedAt ? new Date(c.updatedAt).toLocaleString("ja-JP") : "—"}</td>
+     <td><button class="addrow" data-act="cloudLoad" data-id="${esc(c.id)}">この案件を開く</button></td></tr>`).join("");
+  return `<section class="card" id="sec-cloud">${secH(16,"クラウド保存(スプレッドシート連携)")}
+  <div class="body">
+    <div class="grid">
+      ${F("Apps Script WebアプリURL", inp("root.gasUrl", ROOT.gasUrl, "", "https://script.google.com/macros/s/…/exec"))}
+    </div>
+    <p class="hint">保存すると、指定スプレッドシートに「顧客名_年度」のタブが自動で作成・更新されます(年度は渡航開始日から4月始まりで判定)。スプレッドシートは閲覧専用で共有し、書き込みはこのツール経由でのみ行います。URLが未設定でも、ブラウザ保存とJSON書き出しは通常どおり使えます。</p>
+    <button class="addrow" data-act="cloudSave">☁ この案件をクラウドに保存</button>
+    <button class="addrow" data-act="cloudList">↻ クラウドの案件一覧を取得</button>
+    ${CLOUD_MSG ? `<div class="cloudmsg">${esc(CLOUD_MSG)}</div>` : ""}
+    ${CLOUD_LIST ? `<div class="tw" style="margin-top:10px"><table class="tbl sumtbl">
+      <tr><th>案件名</th><th>顧客名</th><th>更新日時</th><th></th></tr>
+      ${listRows || `<tr><td colspan="4">保存済みの案件はまだありません。</td></tr>`}
+    </table></div>` : ""}
+  </div></section>`;
+}
+/* 年度(4月始まり)とタブ名 */
+function fiscalLabel(){
+  let d = S.basic.startDate ? new Date(S.basic.startDate) : new Date();
+  if (isNaN(d.getTime())) d = new Date();
+  const fy = (d.getMonth() + 1) >= 4 ? d.getFullYear() : d.getFullYear() - 1;
+  return fy + "年度";
+}
+function tabNameFor(){
+  const base = (S.basic.client || S.basic.project || "案件").trim()
+    .replace(/[\[\]\*\/\\\?:]/g, "").slice(0, 60);
+  return base + "_" + fiscalLabel();
+}
+/* スプレッドシートのタブに書き出す内容(全パターン) */
+function buildSheetRows(){
+  const rows = [];
+  const push = (...a) => rows.push(a);
+  push("案件名", S.basic.project);
+  push("顧客名", S.basic.client || "");
+  push("国 / 都市", (S.basic.country || "") + " / " + (S.basic.city || ""));
+  push("参加者数", num(S.basic.participants) + "名(GE事務局" + num(S.basic.geStaff) + "名・先方事務局" + num(S.basic.clientStaff) + "名)");
+  push("渡航期間", (S.basic.startDate || "未定") + " 〜 " + (S.basic.endDate || "未定"));
+  push("計算レート", "TTS " + num(S.fx.tts) + " × " + num(S.fx.markupPct) + "% = " + commonRate().toFixed(4));
+  push("最終更新", new Date().toLocaleString("ja-JP"));
+  push("");
+  for (const p of S.patterns){
+    const C = computeAll(p.data);
+    push("■ パターン:" + (p.name || "(無題)"), "期間:" + (p.data.period || "—"), p.comment || "");
+    push("品目名","税区分","単価(円)","数量","単位","税別金額(円)","消費税(円)","税込金額(円)","備考");
+    for (const l of C.freee){
+      if (l.excluded) push(l.label, "対象外", "", "", "", "", "", "", l.note);
+      else push(l.label, l.taxCat, l.unit, l.qty, l.qtyUnit, l.ex, l.tax, l.inc, l.note);
+    }
+    push("合計", "", "", "", "", C.totals.ex, C.totals.tax, C.totals.inc, "");
+    push("1人あたり", "", "", "", "", C.totals.ppEx, "", C.totals.ppInc, "税別 / 税込");
+    push("原価合計", C.totals.cost, "粗利合計", C.totals.gp, "粗利率", pct(C.totals.gpRate));
+    if (C.flightNote) push("注記", FLIGHT_NOTE);
+    if (C.warn.taxUnknown) push("警告", "課税区分が未確認の項目が " + C.warn.taxUnknown + " 件あります");
+    if (C.warn.ltUnknown) push("警告", "現地税(GST/VAT)が未確認の項目が " + C.warn.ltUnknown + " 件あります");
+    push("");
+  }
+  const w = Math.max(...rows.map(r => r.length), 1);
+  return rows.map(r => { while (r.length < w) r.push(""); return r.map(v => v == null ? "" : v); });
+}
+async function cloudSave(){
+  if (!ROOT.gasUrl){ CLOUD_MSG = "先にApps Script WebアプリURLを入力してください。"; render(); return; }
+  CLOUD_MSG = "保存中…"; render();
+  try {
+    const res = await fetch(ROOT.gasUrl, { method:"POST",
+      headers:{ "Content-Type":"text/plain" },
+      body: JSON.stringify({ action:"save", id:S.id, name:S.basic.project,
+        client:S.basic.client, tabName: tabNameFor(),
+        json: JSON.stringify(S), rows: buildSheetRows() }) });
+    const j = await res.json();
+    CLOUD_MSG = j.ok ? "保存しました → タブ「" + (j.tabName || tabNameFor()) + "」(" + new Date().toLocaleString("ja-JP") + ")"
+                     : "保存に失敗: " + (j.error||"");
+  } catch(err){ CLOUD_MSG = "通信エラー: " + err.message + "(URLとデプロイ設定を確認してください)"; }
+  render();
+}
+async function cloudList(){
+  if (!ROOT.gasUrl){ CLOUD_MSG = "先にApps Script WebアプリURLを入力してください。"; render(); return; }
+  CLOUD_MSG = "一覧を取得中…"; render();
+  try {
+    const res = await fetch(ROOT.gasUrl + "?action=list");
+    const j = await res.json();
+    if (j.ok){ CLOUD_LIST = j.cases; CLOUD_MSG = j.cases.length + " 件の案件が見つかりました。"; }
+    else CLOUD_MSG = "取得に失敗: " + (j.error||"");
+  } catch(err){ CLOUD_MSG = "通信エラー: " + err.message; }
+  render();
+}
+async function cloudLoad(id){
+  CLOUD_MSG = "読み込み中…"; render();
+  try {
+    const res = await fetch(ROOT.gasUrl + "?action=load&id=" + encodeURIComponent(id));
+    const j = await res.json();
+    if (!j.ok) throw new Error(j.error || "not found");
+    const c = JSON.parse(j.json);
+    if (!c.basic || !c.patterns) throw new Error("形式が違います");
+    const i = ROOT.cases.findIndex(x => x.id === c.id);
+    if (i >= 0){
+      if (!confirm(`案件「${c.basic.project}」はこのブラウザにも存在します。クラウドの内容で上書きしますか?`)){ CLOUD_MSG = ""; render(); return; }
+      ROOT.cases[i] = c;
+    } else ROOT.cases.push(c);
+    setActiveCase(c.id);
+    if (!S.patterns.find(p => p.id === S.active)) S.active = S.patterns[0].id;
+    CLOUD_MSG = "読み込みました。"; render(); window.scrollTo({top:0});
+  } catch(err){ CLOUD_MSG = "読み込みに失敗: " + err.message; render(); }
+}
+
+
 function secBasic(){
   const b = S.basic, p = activePat();
   const grp = num(b.groups);
@@ -716,7 +912,7 @@ function secFlight(C){
     ${F("課税区分", taxSel("pat.flight.taxCat", f.taxCat))}
     ${F("備考", inp("pat.flight.note", f.note))}
   </div>
-  ${excluded ? `<div class="notebox">この設定では航空券は<strong>見積合計・freee転記に含まれません</strong>。${C.flightNote ? "サマリーに注記が表示されます。" : "手配区分が「GE見積に含める」の場合のみ合計に含まれます。"}</div>` : `<div class="hint">航空券は見積合計とfreee転記に含まれます。</div>`}
+  ${excluded ? `<div class="notebox">この設定では航空券は見積合計に含まれません。freee転記サマリーの航空券行に次の注記が表示されます:<br><strong>「${FLIGHT_NOTE}」</strong></div>` : `<div class="hint">航空券は見積合計とfreee転記に含まれます(単価 × 対象人数)。</div>`}
   </div></section>`;
 }
 
@@ -814,8 +1010,11 @@ function secTax(C){
 /* --- 14. freee転記用サマリー --- */
 function secFreee(C){
   const t = C.totals;
-  const rows = C.freee.map(l =>
-    `<tr><td>${esc(l.label)}</td><td>${l.taxCat}</td>
+  const rows = C.freee.map(l => l.excluded
+    ? `<tr class="off"><td>${esc(l.label)}</td><td>対象外</td><td class="r">—</td><td class="r">—</td>
+       <td class="r">—</td><td class="r">—</td><td class="r">—</td><td class="r">—</td><td>${esc(l.note)}</td></tr>`
+    : `<tr><td>${esc(l.label)}</td><td>${esc(l.taxCat)}${l.taxCat==="未確認" ? ' <span class="badge warn">要確認</span>' : ""}</td>
+     <td class="r">${fmt(l.unit)}</td><td class="r">${l.qty.toLocaleString("ja-JP")} ${esc(l.qtyUnit)}</td>
      <td class="r">${fmt(l.ex)}</td><td class="r">${fmt(l.tax)}</td><td class="r">${fmt(l.inc)}</td>
      <td class="r man">${man(l.inc)}</td><td>${esc(l.note)}</td></tr>`).join("");
   return `<section class="card" id="sec-freee">${secH(14,"freee転記用サマリー")}
@@ -832,9 +1031,9 @@ function secFreee(C){
     </div>
     <h3>freee転記用明細</h3>
     <div class="tw"><table class="tbl sumtbl">
-      <tr><th>品目名</th><th>税区分</th><th>税別金額(円)</th><th>消費税(円)</th><th>税込金額(円)</th><th>税込(万円)</th><th>備考</th></tr>
+      <tr><th>品目名</th><th>税区分</th><th>単価(円)</th><th>数量</th><th>税別金額(円)</th><th>消費税(円)</th><th>税込金額(円)</th><th>税込(万円)</th><th>備考</th></tr>
       ${rows}
-      <tfoot><tr><td>合計</td><td></td><td class="r">${fmt(t.ex)}</td><td class="r">${fmt(t.tax)}</td>
+      <tfoot><tr><td>合計</td><td></td><td></td><td></td><td class="r">${fmt(t.ex)}</td><td class="r">${fmt(t.tax)}</td>
       <td class="r">${fmt(t.inc)}</td><td class="r man">${man(t.inc)}</td><td></td></tr></tfoot>
     </table></div>
     ${C.flightNote ? `<div class="notebox">※ 航空券は貴社直接手配、または旅行会社から貴社へ直接請求を想定しており、当社見積には含めておりません。</div>` : ""}
@@ -880,13 +1079,14 @@ function render(){
   }
 
   const C = computeAll(activePat().data);
+  renderCasebar();
   renderPatbar();
   renderSumbar(C);
   document.getElementById("main").innerHTML =
     `<datalist id="curlist">${CURRENCIES.map(c=>`<option value="${c}">`).join("")}</datalist>` +
     secBasic() + secFx() + secPre(C) + secConsult(C) + secPartner(C) + secGuest(C) +
     secMa(C) + secBuddy(C) + secHotel(C) + secFlight(C) + secAttend(C) + secMgmt(C) +
-    secTax(C) + secFreee(C) + secCompare();
+    secTax(C) + secFreee(C) + secCompare() + secCloud();
 
   // フォーカス復元
   if (focusP){
@@ -935,6 +1135,7 @@ document.addEventListener("input", e => {
   scheduleRender();
 });
 document.addEventListener("change", e => {
+  if (e.target.id === "casesel"){ setActiveCase(e.target.value); render(); window.scrollTo({top:0}); return; }
   const p = e.target.dataset && e.target.dataset.p;
   if (!p) return;
   if (e.target.dataset.t === "bool") setPath(p, e.target.checked);
@@ -974,6 +1175,34 @@ document.addEventListener("click", e => {
     S.active = S.patterns[0].id; render();
   }
 
+  else if (act === "newCase"){
+    const name = prompt("新しい案件名を入力してください", "新規案件");
+    if (name === null) return;
+    const c = newCase(name); c.basic.client = "";
+    ROOT.cases.push(c); setActiveCase(c.id); render(); window.scrollTo({top:0});
+  }
+
+  else if (act === "dupCase"){
+    const copy = JSON.parse(JSON.stringify(S));
+    copy.id = uid(); copy.updatedAt = Date.now();
+    copy.basic.project = (copy.basic.project || "案件") + " (コピー)";
+    (function reId(o){ if (Array.isArray(o)) o.forEach(reId);
+      else if (o && typeof o === "object"){ if (o.id) o.id = uid(); Object.values(o).forEach(reId); } })(copy.patterns);
+    copy.active = copy.patterns[0].id;
+    ROOT.cases.push(copy); setActiveCase(copy.id); render(); window.scrollTo({top:0});
+  }
+
+  else if (act === "delCase"){
+    if (ROOT.cases.length <= 1) return;
+    if (!confirm(`案件「${S.basic.project}」を削除しますか?\n(クラウドに保存済みの分は残ります)`)) return;
+    ROOT.cases = ROOT.cases.filter(c => c.id !== S.id);
+    setActiveCase(ROOT.cases[0].id); render();
+  }
+
+  else if (act === "cloudSave"){ cloudSave(); }
+  else if (act === "cloudList"){ cloudList(); }
+  else if (act === "cloudLoad"){ cloudLoad(btn.dataset.id); }
+
   else if (act === "export"){
     const blob = new Blob([JSON.stringify(S, null, 2)], { type:"application/json" });
     const a = document.createElement("a");
@@ -986,8 +1215,10 @@ document.addEventListener("click", e => {
   else if (act === "import"){ document.getElementById("filein").click(); }
 
   else if (act === "reset"){
-    if (confirm("すべての入力を消してサンプルデータに戻します。よろしいですか?\n(必要であれば先にJSON書き出しで保存してください)")){
-      S = defaultState(); render();
+    if (confirm(`表示中の案件「${S.basic.project}」の入力を消してサンプルデータに戻します。よろしいですか?\n(他の案件には影響しません)`)){
+      const c = defaultState();
+      for (const k of ["basic","fx","taxRate","patterns","active"]) S[k] = c[k];
+      render();
     }
   }
 });
@@ -1000,10 +1231,11 @@ document.getElementById("filein").addEventListener("change", e => {
     try {
       const obj = JSON.parse(rd.result);
       if (!obj.patterns || !obj.basic) throw new Error("形式が違います");
-      S = obj;
+      obj.id = uid(); obj.updatedAt = Date.now();
+      ROOT.cases.push(obj); setActiveCase(obj.id);
       if (!S.patterns.find(p => p.id === S.active)) S.active = S.patterns[0].id;
       render();
-      alert("読み込みました。");
+      alert("新しい案件として読み込みました。");
     } catch(err){ alert("JSONの読み込みに失敗しました: " + err.message); }
   };
   rd.readAsText(file);
