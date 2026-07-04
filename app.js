@@ -523,7 +523,7 @@ function secCloud(){
     <div class="grid">
       ${F("Apps Script WebアプリURL", inp("root.gasUrl", ROOT.gasUrl, "", "https://script.google.com/macros/s/…/exec"))}
     </div>
-    <p class="hint">保存すると、指定スプレッドシートに「顧客名_年度」のタブが自動で作成・更新されます(年度は渡航開始日から4月始まりで判定)。スプレッドシートは閲覧専用で共有し、書き込みはこのツール経由でのみ行います。URLが未設定でも、ブラウザ保存とJSON書き出しは通常どおり使えます。</p>
+    <p class="hint">保存すると、指定スプレッドシートに「顧客名_年度」のタブが自動で作成・更新されます(年度は渡航開始日から4月始まりで判定)。スプレッドシートは閲覧専用で共有し、書き込みはこのツール経由でのみ行います。URLが未設定でも、ブラウザ保存・JSON書き出し・Excel書き出しは通常どおり使えます。組織のGoogle Workspace設定で外部公開デプロイができない場合は、上部の「Excel書き出し」で同じ内容(顧客名_年度.xlsx)をダウンロードして共有ドライブに保管する運用をおすすめします。</p>
     <button class="addrow" data-act="cloudSave">☁ この案件をクラウドに保存</button>
     <button class="addrow" data-act="cloudList">↻ クラウドの案件一覧を取得</button>
     ${CLOUD_MSG ? `<div class="cloudmsg">${esc(CLOUD_MSG)}</div>` : ""}
@@ -545,36 +545,82 @@ function tabNameFor(){
     .replace(/[\[\]\*\/\\\?:]/g, "").slice(0, 60);
   return base + "_" + fiscalLabel();
 }
-/* スプレッドシートのタブに書き出す内容(全パターン) */
-function buildSheetRows(){
+/* 案件情報の行 */
+function caseInfoRows(){
+  return [
+    ["案件名", S.basic.project],
+    ["顧客名", S.basic.client || ""],
+    ["国 / 都市", (S.basic.country || "") + " / " + (S.basic.city || "")],
+    ["参加者数", num(S.basic.participants) + "名(GE事務局" + num(S.basic.geStaff) + "名・先方事務局" + num(S.basic.clientStaff) + "名)"],
+    ["渡航期間", (S.basic.startDate || "未定") + " 〜 " + (S.basic.endDate || "未定")],
+    ["計算レート", "TTS " + num(S.fx.tts) + " × " + num(S.fx.markupPct) + "% = " + commonRate().toFixed(4)],
+    ["最終更新", new Date().toLocaleString("ja-JP")]
+  ];
+}
+/* 1パターン分の明細行 */
+function patternRows(p){
   const rows = [];
   const push = (...a) => rows.push(a);
-  push("案件名", S.basic.project);
-  push("顧客名", S.basic.client || "");
-  push("国 / 都市", (S.basic.country || "") + " / " + (S.basic.city || ""));
-  push("参加者数", num(S.basic.participants) + "名(GE事務局" + num(S.basic.geStaff) + "名・先方事務局" + num(S.basic.clientStaff) + "名)");
-  push("渡航期間", (S.basic.startDate || "未定") + " 〜 " + (S.basic.endDate || "未定"));
-  push("計算レート", "TTS " + num(S.fx.tts) + " × " + num(S.fx.markupPct) + "% = " + commonRate().toFixed(4));
-  push("最終更新", new Date().toLocaleString("ja-JP"));
-  push("");
+  const C = computeAll(p.data);
+  push("■ パターン:" + (p.name || "(無題)"), "期間:" + (p.data.period || "—"), p.comment || "");
+  push("品目名","税区分","単価(円)","数量","単位","税別金額(円)","消費税(円)","税込金額(円)","備考");
+  for (const l of C.freee){
+    if (l.excluded) push(l.label, "対象外", "", "", "", "", "", "", l.note);
+    else push(l.label, l.taxCat, l.unit, l.qty, l.qtyUnit, l.ex, l.tax, l.inc, l.note);
+  }
+  push("合計", "", "", "", "", C.totals.ex, C.totals.tax, C.totals.inc, "");
+  push("1人あたり", "", "", "", "", C.totals.ppEx, "", C.totals.ppInc, "税別 / 税込");
+  push("原価合計", C.totals.cost, "粗利合計", C.totals.gp, "粗利率", pct(C.totals.gpRate));
+  if (C.flightNote) push("注記", FLIGHT_NOTE);
+  if (C.warn.taxUnknown) push("警告", "課税区分が未確認の項目が " + C.warn.taxUnknown + " 件あります");
+  if (C.warn.ltUnknown) push("警告", "現地税(GST/VAT)が未確認の項目が " + C.warn.ltUnknown + " 件あります");
+  return rows;
+}
+const padRows = rows => { const w = Math.max(...rows.map(r => r.length), 1);
+  return rows.map(r => { while (r.length < w) r.push(""); return r.map(v => v == null ? "" : v); }); };
+/* スプレッドシートのタブに書き出す内容(全パターン結合) */
+function buildSheetRows(){
+  const rows = caseInfoRows(); rows.push([]);
+  for (const p of S.patterns){ rows.push(...patternRows(p)); rows.push([]); }
+  return padRows(rows);
+}
+/* Excel書き出し: 顧客名_年度.xlsx(案件情報シート + パターンごとのシート) */
+function exportExcel(){
+  if (typeof XLSX === "undefined"){
+    alert("Excel出力ライブラリを読み込めませんでした。ネットワーク接続を確認してページを再読み込みしてください。");
+    return;
+  }
+  const wb = XLSX.utils.book_new();
+  const sanitize = s => String(s || "").replace(/[\[\]\*\/\\\?:]/g, "").trim() || "パターン";
+  const COLS = [{wch:36},{wch:9},{wch:12},{wch:8},{wch:6},{wch:14},{wch:12},{wch:14},{wch:40}];
+
+  // 案件情報 + パターン比較
+  const info = caseInfoRows();
+  info.push([]);
+  info.push(["パターン比較"]);
+  info.push(["パターン名","期間","税別合計","消費税","税込合計","1人あたり税別","1人あたり税込","原価合計","粗利合計","粗利率","コメント"]);
   for (const p of S.patterns){
     const C = computeAll(p.data);
-    push("■ パターン:" + (p.name || "(無題)"), "期間:" + (p.data.period || "—"), p.comment || "");
-    push("品目名","税区分","単価(円)","数量","単位","税別金額(円)","消費税(円)","税込金額(円)","備考");
-    for (const l of C.freee){
-      if (l.excluded) push(l.label, "対象外", "", "", "", "", "", "", l.note);
-      else push(l.label, l.taxCat, l.unit, l.qty, l.qtyUnit, l.ex, l.tax, l.inc, l.note);
-    }
-    push("合計", "", "", "", "", C.totals.ex, C.totals.tax, C.totals.inc, "");
-    push("1人あたり", "", "", "", "", C.totals.ppEx, "", C.totals.ppInc, "税別 / 税込");
-    push("原価合計", C.totals.cost, "粗利合計", C.totals.gp, "粗利率", pct(C.totals.gpRate));
-    if (C.flightNote) push("注記", FLIGHT_NOTE);
-    if (C.warn.taxUnknown) push("警告", "課税区分が未確認の項目が " + C.warn.taxUnknown + " 件あります");
-    if (C.warn.ltUnknown) push("警告", "現地税(GST/VAT)が未確認の項目が " + C.warn.ltUnknown + " 件あります");
-    push("");
+    info.push([p.name || "(無題)", p.data.period || "", C.totals.ex, C.totals.tax, C.totals.inc,
+      C.totals.ppEx, C.totals.ppInc, C.totals.cost, C.totals.gp, pct(C.totals.gpRate), p.comment || ""]);
   }
-  const w = Math.max(...rows.map(r => r.length), 1);
-  return rows.map(r => { while (r.length < w) r.push(""); return r.map(v => v == null ? "" : v); });
+  const wsInfo = XLSX.utils.aoa_to_sheet(padRows(info));
+  wsInfo["!cols"] = [{wch:18},{wch:16},{wch:12},{wch:10},{wch:12},{wch:14},{wch:14},{wch:12},{wch:12},{wch:9},{wch:24}];
+  XLSX.utils.book_append_sheet(wb, wsInfo, "案件情報");
+
+  // パターンごとのシート(シート名は31文字制限)
+  const used = new Set(["案件情報"]);
+  S.patterns.forEach((p, idx) => {
+    let name = sanitize(p.name).slice(0, 28) || ("パターン" + (idx + 1));
+    let base = name, n = 2;
+    while (used.has(name)) name = base.slice(0, 25) + "(" + (n++) + ")";
+    used.add(name);
+    const ws = XLSX.utils.aoa_to_sheet(padRows(patternRows(p)));
+    ws["!cols"] = COLS;
+    XLSX.utils.book_append_sheet(wb, ws, name);
+  });
+
+  XLSX.writeFile(wb, tabNameFor() + ".xlsx");
 }
 async function cloudSave(){
   if (!ROOT.gasUrl){ CLOUD_MSG = "先にApps Script WebアプリURLを入力してください。"; render(); return; }
@@ -1202,6 +1248,8 @@ document.addEventListener("click", e => {
   else if (act === "cloudSave"){ cloudSave(); }
   else if (act === "cloudList"){ cloudList(); }
   else if (act === "cloudLoad"){ cloudLoad(btn.dataset.id); }
+
+  else if (act === "excel"){ exportExcel(); }
 
   else if (act === "export"){
     const blob = new Blob([JSON.stringify(S, null, 2)], { type:"application/json" });

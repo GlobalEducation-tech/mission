@@ -139,6 +139,7 @@ details.help li{margin:2px 0}
   <div id="casectl"></div>
   <div id="sumbar"></div>
   <div class="actions">
+    <button data-act="excel">Excel書き出し</button>
     <button data-act="export">JSON書き出し</button>
     <button data-act="import">JSON読み込み</button>
     <button data-act="reset">サンプルに戻す</button>
@@ -150,6 +151,7 @@ details.help li{margin:2px 0}
   <main id="main"></main>
 </div>
 <input type="file" id="filein" accept=".json" style="display:none">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
