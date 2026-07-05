@@ -28,7 +28,9 @@ const fxBlock = (cur, over={}) => Object.assign({
 /* ---------- 既定パターンデータ ---------- */
 function defaultPatternData(){
   return {
-    period: "1週間",
+    basic: { country:"シンガポール", city:"シンガポール", startDate:"", endDate:"",
+      participants:"16", geStaff:"1", clientStaff:"1",
+      lecturers:"0", lecturerStay:false, lecturerFlight:false, groups:"4" },
     pre: {
       kickoff: { on:true, sell:"350000", cost:"0", taxCat:"課税", note:"" },
       orient:  { on:true, sell:"300000", cost:"0", taxCat:"課税", note:"" },
@@ -85,9 +87,7 @@ function defaultPatternData(){
 function defaultState(){
   const pid = uid();
   return {
-    basic: { project:"海外ミッション型研修 価格計算", client:"", country:"シンガポール", city:"シンガポール",
-      startDate:"", endDate:"", participants:"16", geStaff:"1", clientStaff:"1",
-      lecturers:"0", lecturerStay:false, lecturerFlight:false, groups:"4", note:"" },
+    basic: { project:"海外ミッション型研修 価格計算", client:"", note:"" },
     fx: { currency:"SGD", tts:"115.00", markupPct:"105", ltType:"GST", ltMode:"incl", ltRate:"9" },
     taxRate: "10",
     patterns: [ { id: pid, name:"1週間ライト", comment:"", data: defaultPatternData() } ],
@@ -142,7 +142,18 @@ function activePat(){ return S.patterns.find(p => p.id === S.active) || S.patter
 /* 旧データへの後付けフィールド補完 */
 function migrate(){
   for (const c of ROOT.cases){
-    if (c.basic.lecturers == null){ c.basic.lecturers = "0"; c.basic.lecturerStay = false; c.basic.lecturerFlight = false; }
+    if (c.basic.lecturers == null && c.basic.participants != null){
+      c.basic.lecturers = "0"; c.basic.lecturerStay = false; c.basic.lecturerFlight = false; }
+    for (const p of c.patterns){
+      if (p.data.basic == null){
+        const b = c.basic;
+        p.data.basic = { country: b.country || "", city: b.city || "",
+          startDate: b.startDate || "", endDate: b.endDate || "",
+          participants: b.participants ?? "16", geStaff: b.geStaff ?? "1", clientStaff: b.clientStaff ?? "1",
+          lecturers: b.lecturers ?? "0", lecturerStay: !!b.lecturerStay, lecturerFlight: !!b.lecturerFlight,
+          groups: b.groups ?? "4" };
+      }
+    }
     if (c.fx.ltType == null){ c.fx.ltType = "GST"; c.fx.ltMode = "incl"; c.fx.ltRate = "9"; }
     for (const p of c.patterns){
       for (const r of p.data.pre.rows)
@@ -192,21 +203,24 @@ function setPath(path, value){
    丸めルール: 明細行ごとに円未満四捨五入。消費税も明細ごとに計算・四捨五入。
    ===================================================================== */
 function commonRate(){ return num(S.fx.tts) * num(S.fx.markupPct) / 100; }
-function tripNights(){
-  const s = S.basic.startDate, e = S.basic.endDate;
-  if (!s || !e) return null;
-  const d = (new Date(e) - new Date(s)) / 86400000;
+function patBasic(pd){ return (pd || activePat().data).basic; }
+function tripNightsFor(pb){
+  if (!pb.startDate || !pb.endDate) return null;
+  const d = (new Date(pb.endDate) - new Date(pb.startDate)) / 86400000;
   return d >= 0 ? Math.round(d) : null;
 }
-function tripWeeks(){
-  const n = tripNights();
+function tripWeeksFor(pb){
+  const n = tripNightsFor(pb);
   return n != null ? Math.ceil((n + 1) / 7) : null;
 }
-function stayCount(){
-  const b = S.basic;
-  return num(b.participants) + num(b.geStaff) + num(b.clientStaff)
-       + (b.lecturerStay ? num(b.lecturers) : 0);
+function stayCountFor(pb){
+  return num(pb.participants) + num(pb.geStaff) + num(pb.clientStaff)
+       + (pb.lecturerStay ? num(pb.lecturers) : 0);
 }
+/* 表示中パターン用のショートハンド */
+function tripNights(){ return tripNightsFor(patBasic()); }
+function tripWeeks(){ return tripWeeksFor(patBasic()); }
+function stayCount(){ return stayCountFor(patBasic()); }
 
 /* 外貨行 → 円換算原価。現地税(税別)は外貨小計に加算してから換算。 */
 function fxCost(row, fxSub){
@@ -256,7 +270,8 @@ function computeAll(pd){
     r.taxCatUsed = it.taxCat; R["pre-"+k] = r; track(r);
     if (it.on){ acc(cat.pre, r); D(label, r); }
   }
-  const ppl = num(S.basic.participants);
+  const pb = pd.basic || patBasic();
+  const ppl = num(pb.participants);
   for (const row of pd.pre.rows){
     const mat = num(row.matUnit) * ppl;             // 教材費 = 単価 × 参加者数(粗利なし)
     const base = num(row.sell) + mat;
@@ -370,8 +385,8 @@ function computeAll(pd){
 
   /* --- ホテル --- */
   cat.hotel = zero();
-  const hotelNights = tripNights() || 0;
-  const hPeople = stayCount();
+  const hotelNights = tripNightsFor(pb) || 0;
+  const hPeople = stayCountFor(pb);
   for (const row of pd.hotels){
     const fxSub = num(row.rooms) * hotelNights * num(row.fxUnit);
     const raw = fxCost(gFx, fxSub);
@@ -390,8 +405,8 @@ function computeAll(pd){
   cat.flight = zero();
   const f = pd.flight;
   const fDirect = (f.arrange === "貴社直接手配" || f.arrange === "旅行会社から貴社へ直接請求");
-  const fPeople = num(S.basic.participants) + num(S.basic.geStaff) + num(S.basic.clientStaff)
-    + (S.basic.lecturerFlight ? num(S.basic.lecturers) : 0);
+  const fPeople = num(pb.participants) + num(pb.geStaff) + num(pb.clientStaff)
+    + (pb.lecturerFlight ? num(pb.lecturers) : 0);
   { const sell = fPeople * num(f.unit);   // 単価が空欄なら0円=実質含まれない
     const r = finish(sell, sell, f.taxCat, tr);   // 原価・粗利は扱わない(粗利0)
     r.people = fPeople;
@@ -445,7 +460,7 @@ function computeAll(pd){
   for (const k of catKeys){ const c = cat[k];
     total.sell += c.sell; total.cost += c.cost; total.gp += c.gp; total.tax += c.tax; total.taxable += c.taxable; }
   const gpRate = total.sell ? total.gp / total.sell : NaN;
-  const pp = num(S.basic.participants) || 1;
+  const pp = ppl || 1;
 
   /* --- freee転記用明細(項目ごと・単価×数量) ---
      まとめない方針。現地提携先のメイン費用のみ1本に合算し、
@@ -601,7 +616,8 @@ function renderCasebar(){
 
 /* 年度(4月始まり)とタブ名 */
 function fiscalLabel(){
-  let d = S.basic.startDate ? new Date(S.basic.startDate) : new Date();
+  const pbf = patBasic();
+  let d = pbf.startDate ? new Date(pbf.startDate) : new Date();
   if (isNaN(d.getTime())) d = new Date();
   const fy = (d.getMonth() + 1) >= 4 ? d.getFullYear() : d.getFullYear() - 1;
   return fy + "年度";
@@ -616,9 +632,6 @@ function caseInfoRows(){
   return [
     ["案件名", S.basic.project],
     ["顧客名", S.basic.client || ""],
-    ["国 / 都市", (S.basic.country || "") + " / " + (S.basic.city || "")],
-    ["参加者数", num(S.basic.participants) + "名(GE事務局" + num(S.basic.geStaff) + "名・先方事務局" + num(S.basic.clientStaff) + "名)"],
-    ["渡航期間", (S.basic.startDate || "未定") + " 〜 " + (S.basic.endDate || "未定")],
     ["計算レート", "TTS " + num(S.fx.tts) + " × " + num(S.fx.markupPct) + "% = " + commonRate().toFixed(4)],
     ["最終更新", new Date().toLocaleString("ja-JP")]
   ];
@@ -628,7 +641,13 @@ function patternRows(p){
   const rows = [];
   const push = (...a) => rows.push(a);
   const C = computeAll(p.data);
-  push("■ パターン:" + (p.name || "(無題)"), "期間:" + (p.data.period || "—"), p.comment || "");
+  const pb = p.data.basic;
+  const nights = tripNightsFor(pb);
+  push("■ パターン:" + (p.name || "(無題)"), p.comment || "");
+  push("国 / 都市", (pb.country || "") + " / " + (pb.city || ""));
+  push("参加者数", num(pb.participants) + "名(GE事務局" + num(pb.geStaff) + "名・先方事務局" + num(pb.clientStaff) + "名・講師" + num(pb.lecturers) + "名)");
+  push("渡航期間", (pb.startDate || "未定") + " 〜 " + (pb.endDate || "未定") +
+    (nights != null ? "(" + nights + "泊" + (nights+1) + "日・" + tripWeeksFor(pb) + "週間)" : ""));
   push("品目名","税区分","単価(円)","数量","単位","計算式","税別金額(円)","消費税(円)","税込金額(円)","備考");
   for (const l of C.freee){
     if (l.subtotal){ push(l.label, "", "", "", "", "", l.ex, l.tax, l.inc, ""); continue; }
@@ -674,7 +693,8 @@ function exportExcel(){
   info.push(["パターン名","期間","税別合計","消費税","税込合計","1人あたり税別","1人あたり税込","原価合計","粗利合計","粗利率","コメント"]);
   for (const p of S.patterns){
     const C = computeAll(p.data);
-    info.push([p.name || "(無題)", p.data.period || "", C.totals.ex, C.totals.tax, C.totals.inc,
+    const nn = tripNightsFor(p.data.basic);
+    info.push([p.name || "(無題)", nn != null ? nn + "泊" + (nn+1) + "日" : "", C.totals.ex, C.totals.tax, C.totals.inc,
       C.totals.ppEx, C.totals.ppInc, C.totals.cost, C.totals.gp, pct(C.totals.gpRate), p.comment || ""]);
   }
   const wsInfo = XLSX.utils.aoa_to_sheet(padRows(info));
@@ -698,35 +718,38 @@ function exportExcel(){
   XLSX.writeFile(wb, tabNameFor() + ".xlsx");
 }
 function secBasic(){
-  const b = S.basic, p = activePat();
-  const grp = num(b.groups);
-  const perGroup = grp ? (num(b.participants)/grp) : 0;
-  const warnReq = (!b.project || !num(b.participants)) ?
+  const b = S.basic, p = activePat(), pb = p.data.basic;
+  const grp = num(pb.groups);
+  const perGroup = grp ? (num(pb.participants)/grp) : 0;
+  const warnReq = (!b.project || !num(pb.participants)) ?
     `<div class="alertbox">必須項目(案件名・参加者数)が未入力です。</div>` : "";
   return `<section class="card" id="sec-basic">${secH(1,"基本情報")}
-  <div class="body"><div class="grid">
-    ${F("案件名 *", inp("basic.project", b.project))}
-    ${F("顧客名", inp("basic.client", b.client))}
-    ${F("国", inp("basic.country", b.country))}
-    ${F("都市", inp("basic.city", b.city))}
-    ${F("現地提携先名", inp("pat.partner.name", p.data.partner.name))}
+  <div class="body">
+    <div class="grid">
+      ${F("案件名 *(全パターン共通)", inp("basic.project", b.project))}
+      ${F("顧客名(全パターン共通)", inp("basic.client", b.client))}
+      ${F("案件備考(全パターン共通)", inp("basic.note", b.note))}
+    </div>
+    <h3>このパターンの条件(パターンごとに独立)</h3>
+    <div class="grid">
     ${F("パターン名", inp("patName", p.name, "", "例:1週間ライト"))}
-    ${F("研修期間", inp("pat.period", p.data.period, "", "例:1週間"))}
-    ${F("渡航開始日", dinp("basic.startDate", b.startDate))}
-    ${F("渡航終了日", dinp("basic.endDate", b.endDate))}
-    ${F("参加者数 *", ninp("basic.participants", b.participants))}
-    ${F("GE事務局人数", ninp("basic.geStaff", b.geStaff))}
-    ${F("先方事務局人数", ninp("basic.clientStaff", b.clientStaff))}
-    ${F("講師の人数", ninp("basic.lecturers", b.lecturers))}
-    ${F("講師分の加算", chk("basic.lecturerStay", b.lecturerStay, "宿泊に加算") + " " + chk("basic.lecturerFlight", b.lecturerFlight, "航空券に加算"))}
+    ${F("国", inp("pat.basic.country", pb.country))}
+    ${F("都市", inp("pat.basic.city", pb.city))}
+    ${F("現地提携先名", inp("pat.partner.name", p.data.partner.name))}
+    ${F("渡航開始日", dinp("pat.basic.startDate", pb.startDate))}
+    ${F("渡航終了日", dinp("pat.basic.endDate", pb.endDate))}
+    ${F("参加者数 *", ninp("pat.basic.participants", pb.participants))}
+    ${F("GE事務局人数", ninp("pat.basic.geStaff", pb.geStaff))}
+    ${F("先方事務局人数", ninp("pat.basic.clientStaff", pb.clientStaff))}
+    ${F("講師の人数", ninp("pat.basic.lecturers", pb.lecturers))}
+    ${F("講師分の加算", chk("pat.basic.lecturerStay", pb.lecturerStay, "宿泊に加算") + " " + chk("pat.basic.lecturerFlight", pb.lecturerFlight, "航空券に加算"))}
     ${F("宿泊数(日程から自動)", comp(tripNights() != null ? tripNights() + "泊" + (tripNights()+1) + "日" : "日程を入力してください"))}
     ${F("週数(日程から自動)", comp(tripWeeks() != null ? tripWeeks() + "週間" : "—"))}
     ${F("合計宿泊人数(自動)", comp(fmt(stayCount())+" 名"))}
-    ${F("班数", ninp("basic.groups", b.groups))}
+    ${F("班数", ninp("pat.basic.groups", pb.groups))}
     ${F("1班あたり人数", comp(perGroup ? perGroup.toFixed(1)+" 名" : "—"))}
     ${F("パターン備考", inp("patComment", p.comment))}
-    ${F("案件備考", inp("basic.note", b.note))}
-  </div>${warnReq}</div></section>`;
+    </div>${warnReq}</div></section>`;
 }
 
 /* --- 2. 為替 --- */
@@ -781,7 +804,7 @@ function secPre(C){
     return `<tr>${td("")}${td(inp(bp+".name",row.name,"w-l","研修名") + inp(bp+".lecturer",row.lecturer,"w-m","講師名"))}
       ${td(ninp(bp+".sell",row.sell) + `<div class="man">確定 ${fmt(r.sell)}円(10万切上げ)</div>`)}${td(comp(fmt(r.cost)))}
       ${td(ninp(bp+".gpIn",row.gpIn))}${td(comp(pct(r.gpRate), gpCls(r.gpRate)))}${td(taxSel(bp+".taxCat",row.taxCat))}
-      ${td(ninp(bp+".matUnit",row.matUnit,"w-s") + `<div class="man">合計 ${fmt(r.mat||0)}円(×${num(S.basic.participants)}名・粗利なし)</div>`)}
+      ${td(ninp(bp+".matUnit",row.matUnit,"w-s") + `<div class="man">合計 ${fmt(r.mat||0)}円(×${num(patBasic().participants)}名・粗利なし)</div>`)}
       ${td(`<span class="man">回数</span>`+ninp(bp+".times",row.times,"w-s")
          + `<span class="man">時間/回</span>`+ninp(bp+".hours",row.hours,"w-s")
          + `<span class="man">日数</span>`+ninp(bp+".days",row.days,"w-s")
@@ -1164,11 +1187,12 @@ function secCompare(){
     `<tr><td>${lab}</td>${cols.map(({p,c}) => `<td class="r ${cls}">${fn(p,c)}</td>`).join("")}</tr>`;
   return `<section class="card" id="sec-compare">${secH(16,"パターン比較一覧")}
   <div class="body">
-    <p class="hint">上部のパターンタブから「このパターンを複製」で新パターンを作成し、期間・回数・宿泊数などを変えて比較できます。基本情報(顧客・国・参加者数)は全パターン共通です。</p>
+    <p class="hint">上部のパターンタブから「このパターンを複製」で新パターンを作成できます。案件名・顧客名以外(日程・参加者数・国・費用)はすべてパターンごとに独立しており、複製後の編集は互いに影響しません。</p>
     <div class="tw"><table class="tbl sumtbl">
       <tr><th>項目</th>${cols.map(({p}) => `<th>${esc(p.name||"(無題)")}${p.id===S.active?' <span class="badge ok">表示中</span>':""}</th>`).join("")}</tr>
-      ${row("参加者数", () => fmt(num(S.basic.participants))+" 名")}
-      ${row("期間", p => esc(p.data.period||"—"))}
+      ${row("参加者数", p => fmt(num(p.data.basic.participants))+" 名")}
+      ${row("期間", p => { const n = tripNightsFor(p.data.basic);
+        return n != null ? n + "泊" + (n+1) + "日(" + tripWeeksFor(p.data.basic) + "週間)" : "—"; })}
       ${row("税別合計", (p,c) => fmt(c.totals.ex)+"円")}
       ${row("(万円)", (p,c) => man(c.totals.ex), "man")}
       ${row("税込合計", (p,c) => fmt(c.totals.inc)+"円")}
@@ -1264,10 +1288,11 @@ document.addEventListener("compositionend", e => {
    渡航開始日を選んだら終了日の初期値に自動コピー。 */
 function handleDateInput(p, v){
   setPath(p, v);
-  if (p === "basic.startDate" && v){
-    if (!S.basic.endDate || S.basic.endDate < v){
-      S.basic.endDate = v;
-      const el = document.querySelector('[data-p="basic.endDate"]');
+  if (p === "pat.basic.startDate" && v){
+    const pb = patBasic();
+    if (!pb.endDate || pb.endDate < v){
+      pb.endDate = v;
+      const el = document.querySelector('[data-p="pat.basic.endDate"]');
       if (el) el.value = v;
     }
   }
