@@ -262,8 +262,9 @@ function computeAll(pd){
     R["cg"] = r; track(r);
     if (c.on){ acc(cat.consult, r); D("コンサルティング(" + (c.name || "班別") + ")", r); }
   }
+  const cmGroups = num(pd.cg.targetGroups) || 1;
   for (const row of pd.cm){
-    const totalH = (num(row.preCnt)+num(row.localCnt)+num(row.postCnt)) * num(row.hoursPer);
+    const totalH = cmGroups * (num(row.preCnt)+num(row.localCnt)+num(row.postCnt)) * num(row.hoursPer);
     const sell = totalH * num(row.unit);
     const cost = rnd(sell * num(row.costRate)/100);
     const r = finish(sell, cost, row.taxCat, tr);
@@ -326,7 +327,7 @@ function computeAll(pd){
     Object.assign(rL, { totalH, taxCatUsed: b.taxCat });
     R["buddy-local"] = rL;
     const sellMtg = num(b.mtgCnt) * num(b.mtgUnit);
-    const costMtg = sellMtg;   // 原価 = 単価 × 回数(自動)
+    const costMtg = num(b.mtgCost);   // 原価は手入力
     const rM = finish(sellMtg, costMtg, b.taxCat, tr);
     rM.taxCatUsed = b.taxCat; R["buddy-mtg"] = rM;
     if (b.on){ track(rL); acc(cat.buddy, rL); acc(cat.buddy, rM);
@@ -350,8 +351,10 @@ function computeAll(pd){
   cat.flight = zero();
   const f = pd.flight;
   const fIncluded = f.arrange === "GE見積に含める";
-  { const sell = num(f.people) * num(f.unit);
-    const r = finish(sell, num(f.cost), f.taxCat, tr);
+  const fPeople = num(S.basic.participants) + num(S.basic.geStaff) + num(S.basic.clientStaff);
+  { const sell = fPeople * num(f.unit);
+    const r = finish(sell, sell, f.taxCat, tr);   // 原価・粗利は扱わない(粗利0)
+    r.people = fPeople;
     r.taxCatUsed = f.taxCat; R["flight"] = r;
     if (fIncluded){ track(r); acc(cat.flight, r); D("航空券", r); }
   }
@@ -448,7 +451,7 @@ function computeAll(pd){
     { note: `対象 ${fmt(R["mgmt"].base)}円 × ${num(pd.mgmt.ratePct)}%` });
 
   if (fIncluded)
-    L("航空券", R["flight"], f.taxCat, { unit: num(f.unit), qty: num(f.people), qtyUnit: "名" });
+    L("航空券", R["flight"], f.taxCat, { unit: num(f.unit), qty: fPeople, qtyUnit: "名" });
   else
     freee.push({ label: "航空券", taxCat: "対象外", unit: null, qty: null, qtyUnit: "",
       ex: 0, tax: 0, inc: 0, note: FLIGHT_NOTE, excluded: true });
@@ -469,7 +472,14 @@ function computeAll(pd){
    描画ヘルパー
    ===================================================================== */
 const inp  = (p,v,cls="",ph="") => `<input data-p="${p}" class="${cls}" value="${esc(v)}" placeholder="${esc(ph)}">`;
-const ninp = (p,v,cls="w-m") => `<input data-p="${p}" data-t="num" class="num ${cls}" inputmode="decimal" value="${esc(v)}">`;
+let CUR_FOCUS = null;   // 編集中の欄はカンマ整形せず生の値を表示
+function fmtInputVal(v){
+  if (v === "" || v == null) return v;
+  const n = parseFloat(String(v).replace(/,/g, ""));
+  if (!isFinite(n)) return v;
+  return n.toLocaleString("ja-JP", { maximumFractionDigits: 6 });
+}
+const ninp = (p,v,cls="w-m") => `<input data-p="${p}" data-t="num" class="num ${cls}" inputmode="decimal" value="${esc(p === CUR_FOCUS ? v : fmtInputVal(v))}">`;
 const dinp = (p,v) => `<input type="date" data-p="${p}" value="${esc(v)}">`;
 const sel  = (p,v,opts,cls="") => `<select data-p="${p}" class="${cls}">` +
   opts.map(o => { const [val,lab] = Array.isArray(o) ? o : [o,o];
@@ -747,8 +757,9 @@ function secConsult(C){
     </div>
     <p class="hint">例:4班 × (渡航前2回+現地2回) × 1時間 = 16時間 × 70,000円 = 1,120,000円</p>
     <h3>4-2. ミッション企業とのコンサルティング</h3>
+    <p class="hint">回数は<strong>1班あたり</strong>で入力してください。上の対象班数(現在 ${esc(c.targetGroups)}班)を自動で掛けて合計時間を計算します。</p>
     <div class="tw"><table class="tbl">
-      <tr><th>対象企業名</th><th>渡航前</th><th>現地中</th><th>帰国後</th><th>時間/回</th><th>合計時間</th>
+      <tr><th>対象企業名</th><th>渡航前/班</th><th>現地中/班</th><th>帰国後/班</th><th>時間/回</th><th>合計時間(班数込み)</th>
       <th>単価</th><th>売価</th><th>原価率%</th><th>原価</th><th>粗利</th><th>粗利率</th><th>課税区分</th><th>備考</th><th></th></tr>
       ${cmRows}
     </table></div>${addBtn("cm","ミッション企業コンサルを追加")}
@@ -884,7 +895,7 @@ function secBuddy(C){
       ${F("回数", ninp("pat.buddy.mtgCnt", b.mtgCnt))}
       ${F("単価(円/回)", ninp("pat.buddy.mtgUnit", b.mtgUnit))}
       ${F("売価(自動)", comp(fmt(rM.sell)+"円"))}
-      ${F("原価(自動:単価×回数)", comp(fmt(rM.cost)+"円"))}
+      ${F("原価(手入力)", ninp("pat.buddy.mtgCost", b.mtgCost))}
       ${F("粗利", comp(fmt(rM.gp)+"円", gpCls(rM.gpRate)))}
       ${F("課税区分(共通)", taxSel("pat.buddy.taxCat", b.taxCat))}
       ${F("備考", inp("pat.buddy.note", b.note))}
@@ -905,7 +916,6 @@ function secHotel(C){
       ${td(`<div class="comp"><strong>${fmt(r.cost)}</strong>円<div class="man">${man(r.cost)}${r.raw !== r.cost ? " | 切上げ前 " + fmt(r.raw) + "円" : ""}</div></div>`)}
       ${td(sel(bp+".breakfast",row.breakfast,["込み","別","不明"],"w-s"))}
       ${td(sel(bp+".taxSvc",row.taxSvc,["込み","別","不明"],"w-s"))}
-      ${td(inp(bp+".cancel",row.cancel,"w-m","キャンセル条件"))}
       ${td(taxSel(bp+".taxCat",row.taxCat))}${td(inp(bp+".note",row.note,"w-m"))}
       ${td(delBtn("hotels",row.id))}</tr>`; }).join("");
   return `<section class="card" id="sec-hotel">${secH(9,"ホテル費用")}
@@ -914,7 +924,7 @@ function secHotel(C){
     <div class="tw"><table class="tbl">
       <tr><th></th><th>ホテル名/都市</th><th>部屋タイプ</th><th>宿泊対象人数</th><th>宿泊数</th><th>部屋数</th>
       <th>1泊1室 外貨単価(${esc(S.fx.currency)})</th><th>外貨小計</th>
-      <th>円換算原価=売価(自動・万切上げ)</th><th>朝食</th><th>税サ</th><th>キャンセル条件</th><th>課税区分</th><th>備考</th><th></th></tr>
+      <th>円換算原価=売価(自動・万切上げ)</th><th>朝食</th><th>税サ</th><th>課税区分</th><th>備考</th><th></th></tr>
       ${body}
     </table></div>${addBtn("hotels","ホテルを追加")}
   </div></section>`;
@@ -928,11 +938,9 @@ function secFlight(C){
   <div class="body"><div class="grid">
     ${F("手配区分", sel("pat.flight.arrange", f.arrange,
         ["GE見積に含める","貴社直接手配","旅行会社から貴社へ直接請求","未定"]))}
-    ${F("対象人数", ninp("pat.flight.people", f.people))}
+    ${F("対象人数(自動:参加者+GE事務局+先方事務局)", comp(fmt(r.people)+" 名"))}
     ${F("1人あたり単価(円)", ninp("pat.flight.unit", f.unit))}
-    ${F("売価=合計金額(自動)", comp(fmt(r.sell)+"円","big"))}
-    ${F("原価", ninp("pat.flight.cost", f.cost))}
-    ${F("粗利", comp(fmt(r.gp)+"円", gpCls(r.gpRate)))}
+    ${F("合計金額(自動)", comp(fmt(r.sell)+"円","big"))}
     ${F("課税区分", taxSel("pat.flight.taxCat", f.taxCat))}
     ${F("備考", inp("pat.flight.note", f.note))}
   </div>
@@ -1088,6 +1096,7 @@ function render(){
     focusP = ae.dataset.p;
     try { selS = ae.selectionStart; selE = ae.selectionEnd; } catch(e){}
   }
+  CUR_FOCUS = focusP;
 
   const C = computeAll(activePat().data);
   renderCasebar();
@@ -1137,6 +1146,12 @@ function tblArray(key){
    ===================================================================== */
 let raf = null;
 function scheduleRender(){ if (raf) return; raf = requestAnimationFrame(() => { raf = null; render(); }); }
+
+/* 数値欄からフォーカスが外れたらカンマ表示に整形 */
+document.addEventListener("focusout", e => {
+  const t = e.target;
+  if (t && t.dataset && t.dataset.p && t.classList && t.classList.contains("num")) scheduleRender();
+});
 
 /* 日本語入力(IME)中は再描画しない。確定時に反映する。 */
 let composing = false;
