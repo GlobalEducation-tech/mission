@@ -376,7 +376,7 @@ function computeAll(pd){
     const fxSub = num(row.rooms) * hotelNights * num(row.fxUnit);
     const raw = fxCost(gFx, fxSub);
     const cost = ceilMan(raw);
-    const unitPP = hPeople > 0 && cost > 0 ? Math.ceil(cost / hPeople) : cost;   // 1人あたり(円切上げ)
+    const unitPP = hPeople > 0 && cost > 0 ? Math.ceil(cost / hPeople / 10000) * 10000 : cost;   // 1人あたり(万円単位に切上げ)
     const sellH = hPeople > 0 && cost > 0 ? unitPP * hPeople : cost;
     const r = finish(sellH, cost, row.taxCat, tr);   // 売価 = 1人単価 × 宿泊人数(端数分は粗利)
     r.unitPP = unitPP; r.hPeople = hPeople;
@@ -495,7 +495,7 @@ function computeAll(pd){
     const rr = R[row.id];
     L(`ホテル費${row.name ? "(" + row.name + ")" : ""}`, rr, row.taxCat,
       { unit: rr.unitPP, qty: rr.hPeople || 1, qtyUnit: "名",
-        note: `${num(row.rooms)}室 × ${hotelNights}泊。1人あたり × 宿泊人数` }); }
+        note: `${num(row.rooms)}室 × ${hotelNights}泊。1人あたり(万円単位)× 宿泊人数` }); }
   L("航空券", R["flight"], f.taxCat,
     { unit: num(f.unit), qty: fPeople, qtyUnit: "名",
       note: fDirect ? FLIGHT_NOTE : (num(f.unit) ? "" : "単価未入力のため0円(見積に含めない場合は空欄のまま)") });
