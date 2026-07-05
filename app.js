@@ -326,9 +326,11 @@ function computeAll(pd){
     const rL = finish(sellLocal, costLocal, b.taxCat, tr);
     Object.assign(rL, { totalH, taxCatUsed: b.taxCat });
     R["buddy-local"] = rL;
-    const sellMtg = num(b.mtgCnt) * num(b.mtgUnit);
+    const mtgTotalCnt = (num(pd.cg.targetGroups) || 1) * num(b.mtgCnt);
+    const sellMtg = mtgTotalCnt * num(b.mtgUnit);
     const costMtg = num(b.mtgCost);   // 原価は手入力
     const rM = finish(sellMtg, costMtg, b.taxCat, tr);
+    rM.totalCnt = mtgTotalCnt;
     rM.taxCatUsed = b.taxCat; R["buddy-mtg"] = rM;
     if (b.on){ track(rL); acc(cat.buddy, rL); acc(cat.buddy, rM);
       D("バディ(現地稼働)", rL); if (rM.sell || rM.cost) D("バディ(オンラインMTG)", rM); }
@@ -367,7 +369,7 @@ function computeAll(pd){
       const r = finish(sell, 0, row.taxCat, tr);   // 原価は管理しない
       r.taxCatUsed = row.taxCat; R[row.id] = r; track(r);
       acc(cat[key], r);
-      D(lab + (row.person ? "(" + row.person + ")" : ""), r);
+      D(lab, r);
     }
   }
 
@@ -435,7 +437,7 @@ function computeAll(pd){
       { unit: num(pd.buddy.unit), qty: R["buddy-local"].totalH, qtyUnit: "時間" });
     if (R["buddy-mtg"].sell)
       L("バディ手配費(渡航前オンラインMTG)", R["buddy-mtg"], pd.buddy.taxCat,
-        { unit: num(pd.buddy.mtgUnit), qty: num(pd.buddy.mtgCnt), qtyUnit: "回" });
+        { unit: num(pd.buddy.mtgUnit), qty: R["buddy-mtg"].totalCnt, qtyUnit: "回" });
   }
 
   for (const row of pd.hotels){ if (!row.on) continue;
@@ -444,7 +446,7 @@ function computeAll(pd){
 
   for (const [key, rows, lab] of [["al", pd.al, "現地アテンド費"], ["ad", pd.ad, "国内アテンド費"]])
     for (const row of rows)
-      L(`${lab}${row.person ? "(" + row.person + ")" : ""}`, R[row.id], row.taxCat,
+      L(lab, R[row.id], row.taxCat,
         { unit: num(row.unit), qty: num(row.days), qtyUnit: "日" });
 
   L("企画・管理費", R["mgmt"], pd.mgmt.taxCat,
@@ -573,13 +575,15 @@ function patternRows(p){
   const push = (...a) => rows.push(a);
   const C = computeAll(p.data);
   push("■ パターン:" + (p.name || "(無題)"), "期間:" + (p.data.period || "—"), p.comment || "");
-  push("品目名","税区分","単価(円)","数量","単位","税別金額(円)","消費税(円)","税込金額(円)","備考");
+  push("品目名","税区分","単価(円)","数量","単位","計算式","税別金額(円)","消費税(円)","税込金額(円)","備考");
   for (const l of C.freee){
-    if (l.excluded) push(l.label, "対象外", "", "", "", "", "", "", l.note);
-    else push(l.label, l.taxCat, l.unit, l.qty, l.qtyUnit, l.ex, l.tax, l.inc, l.note);
+    if (l.excluded){ push(l.label, "対象外", "", "", "", "", "", "", "", l.note); continue; }
+    const formula = l.qtyUnit === "式" ? "一式"
+      : fmt(l.unit) + " × " + l.qty.toLocaleString("ja-JP") + l.qtyUnit + " = " + fmt(l.ex);
+    push(l.label, l.taxCat, l.unit, l.qty, l.qtyUnit, formula, l.ex, l.tax, l.inc, l.note);
   }
-  push("合計", "", "", "", "", C.totals.ex, C.totals.tax, C.totals.inc, "");
-  push("1人あたり", "", "", "", "", C.totals.ppEx, "", C.totals.ppInc, "税別 / 税込");
+  push("合計", "", "", "", "", "", C.totals.ex, C.totals.tax, C.totals.inc, "");
+  push("1人あたり", "", "", "", "", "", C.totals.ppEx, "", C.totals.ppInc, "税別 / 税込");
   push("原価合計", C.totals.cost, "粗利合計", C.totals.gp, "粗利率", pct(C.totals.gpRate));
   if (C.flightNote) push("注記", FLIGHT_NOTE);
   if (C.warn.taxUnknown) push("警告", "課税区分が未確認の項目が " + C.warn.taxUnknown + " 件あります");
@@ -588,6 +592,16 @@ function patternRows(p){
 }
 const padRows = rows => { const w = Math.max(...rows.map(r => r.length), 1);
   return rows.map(r => { while (r.length < w) r.push(""); return r.map(v => v == null ? "" : v); }); };
+/* 数値セルに3桁区切り書式を適用 */
+function applyNumFmt(ws){
+  if (!ws["!ref"]) return;
+  const range = XLSX.utils.decode_range(ws["!ref"]);
+  for (let r = range.s.r; r <= range.e.r; r++)
+    for (let c = range.s.c; c <= range.e.c; c++){
+      const cell = ws[XLSX.utils.encode_cell({ r, c })];
+      if (cell && cell.t === "n") cell.z = "#,##0";
+    }
+}
 /* Excel書き出し: 顧客名_年度.xlsx(案件情報シート + パターンごとのシート) */
 function exportExcel(){
   if (typeof XLSX === "undefined"){
@@ -596,7 +610,7 @@ function exportExcel(){
   }
   const wb = XLSX.utils.book_new();
   const sanitize = s => String(s || "").replace(/[\[\]\*\/\\\?:]/g, "").trim() || "パターン";
-  const COLS = [{wch:36},{wch:9},{wch:12},{wch:8},{wch:6},{wch:14},{wch:12},{wch:14},{wch:40}];
+  const COLS = [{wch:36},{wch:9},{wch:12},{wch:8},{wch:6},{wch:26},{wch:14},{wch:12},{wch:14},{wch:40}];
 
   // 案件情報 + パターン比較
   const info = caseInfoRows();
@@ -610,6 +624,7 @@ function exportExcel(){
   }
   const wsInfo = XLSX.utils.aoa_to_sheet(padRows(info));
   wsInfo["!cols"] = [{wch:18},{wch:16},{wch:12},{wch:10},{wch:12},{wch:14},{wch:14},{wch:12},{wch:12},{wch:9},{wch:24}];
+  applyNumFmt(wsInfo);
   XLSX.utils.book_append_sheet(wb, wsInfo, "案件情報");
 
   // パターンごとのシート(シート名は31文字制限)
@@ -621,6 +636,7 @@ function exportExcel(){
     used.add(name);
     const ws = XLSX.utils.aoa_to_sheet(padRows(patternRows(p)));
     ws["!cols"] = COLS;
+    applyNumFmt(ws);
     XLSX.utils.book_append_sheet(wb, ws, name);
   });
 
@@ -891,8 +907,10 @@ function secBuddy(C){
       ${F("粗利率", comp(pct(rL.gpRate), gpCls(rL.gpRate)))}
     </div>
     <h3>渡航前オンラインMTG</h3>
+    <p class="hint">回数は<strong>1班あたり</strong>で入力してください。対象班数(現在 ${esc(activePat().data.cg.targetGroups)}班)を自動で掛けます。</p>
     <div class="grid">
-      ${F("回数", ninp("pat.buddy.mtgCnt", b.mtgCnt))}
+      ${F("回数(1班あたり)", ninp("pat.buddy.mtgCnt", b.mtgCnt))}
+      ${F("合計回数(自動:×班数)", comp(rM.totalCnt + " 回"))}
       ${F("単価(円/回)", ninp("pat.buddy.mtgUnit", b.mtgUnit))}
       ${F("売価(自動)", comp(fmt(rM.sell)+"円"))}
       ${F("原価(手入力)", ninp("pat.buddy.mtgCost", b.mtgCost))}
@@ -952,13 +970,12 @@ function secFlight(C){
 function attendTable(C, key, title){
   const rows = activePat().data[key];
   const body = rows.map((row,i) => { const bp = `pat.${key}.${i}`, r = C.R[row.id];
-    return `<tr>${td(inp(bp+".person",row.person,"w-l","担当者名"))}
-      ${td(ninp(bp+".days",row.days,"w-s"))}${td(ninp(bp+".unit",row.unit))}
+    return `<tr>${td(ninp(bp+".days",row.days,"w-s"))}${td(ninp(bp+".unit",row.unit))}
       ${td(comp(fmt(r.sell)+"円"))}
       ${td(taxSel(bp+".taxCat",row.taxCat))}${td(inp(bp+".note",row.note,"w-m"))}
       ${td(delBtn(key,row.id))}</tr>`; }).join("");
   return `<h3>${title}</h3><div class="tw"><table class="tbl">
-    <tr><th>担当者名</th><th>稼働日数</th><th>1日あたり単価</th><th>売価(自動)</th><th>課税区分</th><th>備考</th><th></th></tr>
+    <tr><th>稼働日数</th><th>1日あたり単価</th><th>売価(自動)</th><th>課税区分</th><th>備考</th><th></th></tr>
     ${body}</table></div>${addBtn(key,"担当者を追加")}`;
 }
 function secAttend(C){
