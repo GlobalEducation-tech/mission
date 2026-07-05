@@ -33,7 +33,7 @@ function defaultPatternData(){
       kickoff: { on:true, sell:"350000", cost:"0", taxCat:"課税", note:"" },
       orient:  { on:true, sell:"300000", cost:"0", taxCat:"課税", note:"" },
       rows: [
-        { id:uid(), name:"異文化理解研修", lecturer:"", times:"1", hours:"3", days:"1", sell:"", cost:"", taxCat:"課税", note:"" }
+        { id:uid(), name:"異文化理解研修", lecturer:"", times:"1", hours:"3", days:"1", sell:"", gpIn:"0", taxCat:"課税", note:"" }
       ]
     },
     cg: { on:true, name:"Alby", targetGroups:"4", preCnt:"2", localCnt:"2", postCnt:"0",
@@ -84,8 +84,9 @@ function defaultState(){
     basic: { project:"海外ミッション型研修 価格計算", client:"", country:"シンガポール", city:"シンガポール",
       startDate:"", endDate:"", participants:"16", geStaff:"1", clientStaff:"1",
       stayOverride:"", groups:"4", note:"" },
-    fx: { currency:"SGD", tts:"115.00", markupPct:"105" },
+    fx: { currency:"SGD", tts:"115.00", markupPct:"105", ltType:"GST", ltMode:"incl", ltRate:"9" },
     taxRate: "10",
+    taxMode: "rate",
     patterns: [ { id: pid, name:"1週間ライト", comment:"", data: defaultPatternData() } ],
     active: pid
   };
@@ -135,6 +136,16 @@ function save(){
   }, 300);
 }
 function activePat(){ return S.patterns.find(p => p.id === S.active) || S.patterns[0]; }
+/* 旧データへの後付けフィールド補完 */
+function migrate(){
+  for (const c of ROOT.cases){
+    if (c.taxMode == null) c.taxMode = "rate";
+    if (c.fx.ltType == null){ c.fx.ltType = "GST"; c.fx.ltMode = "incl"; c.fx.ltRate = "9"; }
+    for (const p of c.patterns)
+      for (const r of p.data.pre.rows)
+        if (r.gpIn == null) r.gpIn = String(num(r.sell) - num(r.cost));
+  }
+}
 
 /* ---------- path helpers (data-p) ---------- */
 function resolve(path){
@@ -142,6 +153,7 @@ function resolve(path){
   const parts = path.split(".");
   const head = parts.shift();
   if (head === "taxRate") return { obj: S, key: "taxRate" };
+  if (head === "taxMode") return { obj: S, key: "taxMode" };
   if (head === "patName") return { obj: activePat(), key: "name" };
   if (head === "patComment") return { obj: activePat(), key: "comment" };
   let obj;
@@ -201,7 +213,7 @@ function acc(sum, r){ sum.sell += r.sell; sum.cost += r.cost; sum.gp += r.gp; su
   if (r.tax > 0) sum.taxable += r.sell; return sum; }
 
 function computeAll(pd){
-  const tr = num(S.taxRate);
+  const tr = S.taxMode === "included" ? 0 : num(S.taxRate);
   const R = {};                       // rowId → computed
   const cat = {};                     // カテゴリ集計
   let taxUnknown = 0, ltUnknown = 0, ltExcl = 0;
@@ -218,7 +230,9 @@ function computeAll(pd){
     if (it.on) acc(cat.pre, r);
   }
   for (const row of pd.pre.rows){
-    const r = finish(num(row.sell), num(row.cost), row.taxCat, tr);
+    const sell = num(row.sell);
+    const gp = row.gpIn != null ? num(row.gpIn) : sell - num(row.cost);
+    const r = finish(sell, sell - gp, row.taxCat, tr);
     r.taxCatUsed = row.taxCat; R[row.id] = r; track(r); acc(cat.pre, r);
   }
 
@@ -251,10 +265,12 @@ function computeAll(pd){
     ...pd.partner.transport.map(r => [r, num(r.times) * num(r.vehicles) * num(r.fxUnit)]),
     ...pd.partner.other.map(r => [r, num(r.qty) * num(r.fxUnit)])
   ];
+  const gFx = { rateMode:"common", customRate:"", jpyCost:"",
+    ltType: S.fx.ltType, ltMode: S.fx.ltMode, ltRate: S.fx.ltRate };
   for (const [row, fxSub] of pRows){
-    const cost = fxCost(row, fxSub);
+    const cost = fxCost(gFx, fxSub);
     const r = finish(num(row.sell), cost, row.taxCat, tr);
-    r.fxSub = fxSub; r.lt = ltFlag(row); r.taxCatUsed = row.taxCat;
+    r.fxSub = fxSub; r.lt = ltFlag(gFx); r.taxCatUsed = row.taxCat;
     R[row.id] = r; track(r); trackLt(r.lt);
     acc(cat.partner, r);
   }
@@ -628,9 +644,22 @@ function secFx(){
       ${F("TTSレート", ninp("fx.tts", f.tts))}
       ${F("上乗せ率(%)", ninp("fx.markupPct", f.markupPct))}
       ${F("計算レート(自動)", comp(commonRate().toFixed(4), "big"))}
-      ${F("消費税率(%)", ninp("taxRate", S.taxRate))}
     </div>
-    <p class="hint">海外原価の明細行は初期状態でこの共通計算レートを使用します。行ごとに「個別レート」「円建て(円で直接入力)」へ切り替え可能です。円未満は明細行ごとに四捨五入します。</p>
+    <a class="addrow" style="display:inline-block;text-decoration:none;margin-top:8px" target="_blank" rel="noopener"
+       href="https://www.murc-kawasesouba.jp/fx/index.php">↗ 本日のTTSレートを確認(三菱UFJリサーチ&コンサルティング)</a>
+    <h3>消費税(日本)</h3>
+    <div class="grid">
+      ${F("消費税の扱い", sel("taxMode", S.taxMode, [["rate","税率を指定する"],["included","限定提携会社からの見積もりに含まれる"]]))}
+      ${S.taxMode === "rate" ? F("消費税率(%)", ninp("taxRate", S.taxRate)) :
+        F("消費税", comp("見積に含まれるため加算しません"))}
+    </div>
+    <h3>現地税(GST/VAT)の共通設定</h3>
+    <div class="grid">
+      ${F("税の種類", sel("fx.ltType", f.ltType, LTTYPES))}
+      ${F("見積への含まれ方", sel("fx.ltMode", f.ltMode, [["incl","税込(原価に含まれている)"],["excl","税別(原価に自動加算する)"],["unknown","未確認"]]))}
+      ${F("現地税率(%)", ninp("fx.ltRate", f.ltRate))}
+    </div>
+    <p class="hint">現地提携先費用(第5章)の円換算は、この共通計算レートと現地税設定を自動で使用します。「税別」を選ぶと外貨小計に現地税を加算してから円換算します。ホテル・ゲストスピーカーは行ごとに個別設定できます。円未満は明細行ごとに四捨五入します。</p>
     <details class="help"><summary>現地税(GST/VAT)とは — 入力前に確認</summary>
       <p>GST(Goods and Services Tax)やVAT(Value Added Tax)は、海外の消費税に相当する税金です。現地提携先・ホテル・交通機関などの請求額に含まれる(または加算される)ことがあります。</p>
       <ul>
@@ -661,8 +690,8 @@ function secPre(C){
       ${td(inp(`pat.pre.${key}.note`, it.note,"w-l"))}<td></td></tr>`; };
   const rows = pre.rows.map((row,i) => { const bp = `pat.pre.rows.${i}`, r = C.R[row.id];
     return `<tr>${td("")}${td(inp(bp+".name",row.name,"w-l","研修名") + inp(bp+".lecturer",row.lecturer,"w-m","講師名"))}
-      ${td(ninp(bp+".sell",row.sell))}${td(ninp(bp+".cost",row.cost))}
-      ${gpTds(r)}${td(taxSel(bp+".taxCat",row.taxCat))}
+      ${td(ninp(bp+".sell",row.sell))}${td(comp(fmt(r.cost)))}
+      ${td(ninp(bp+".gpIn",row.gpIn))}${td(comp(pct(r.gpRate), gpCls(r.gpRate)))}${td(taxSel(bp+".taxCat",row.taxCat))}
       ${td(`<span class="man">回数</span>`+ninp(bp+".times",row.times,"w-s")
          + `<span class="man">時間/回</span>`+ninp(bp+".hours",row.hours,"w-s")
          + `<span class="man">日数</span>`+ninp(bp+".days",row.days,"w-s")
@@ -671,6 +700,7 @@ function secPre(C){
   return `<section class="card" id="sec-pre">${secH(3,"事前研修・国内準備")}
   <div class="body"><div class="tw"><table class="tbl">
     <tr><th></th><th>項目</th><th>売価</th><th>原価</th><th>粗利</th><th>粗利率</th><th>課税区分</th><th>回数・時間・備考</th><th></th></tr>
+    <tr><td colspan="9" class="hint" style="padding:4px 8px">キックオフ・オリエンは原価を入力(粗利は自動)。追加した事前研修行は<strong>粗利を入力</strong>(原価は自動計算)。</td></tr>
     ${fixedRow("kickoff","キックオフ(定額)")}
     ${fixedRow("orient","出発前オリエンテーション(定額)")}
     ${rows}
@@ -726,14 +756,13 @@ function partnerTable(C, key, title, qtyCols){
     return `<tr>${td(inp(bp+".name",row.name,"w-l","詳細名"))}
       ${qtyCols.map(([k,,cls]) => td(k==="desc" ? inp(bp+".desc",row.desc,"w-m") : ninp(bp+"."+k,row[k],cls||"w-s"))).join("")}
       ${td(ninp(bp+".fxUnit",row.fxUnit))}${td(comp(r.fxSub.toLocaleString("ja-JP",{maximumFractionDigits:2})))}
-      ${fxTds(bp,row)}
-      ${td(comp(fmt(r.cost)))}
+      ${td(`<div class="comp">${fmt(r.cost)}<div class="man">${man(r.cost)}</div></div>`)}
       ${td(ninp(bp+".sell",row.sell))}${gpTds(r)}
       ${td(taxSel(bp+".taxCat",row.taxCat))}${td(inp(bp+".note",row.note,"w-m"))}
       ${td(delBtn("partner."+key,row.id))}</tr>`; }).join("");
   return `<h3>${title}</h3><div class="tw"><table class="tbl">
     <tr><th>詳細名</th>${qtyCols.map(([,lab])=>`<th>${lab}</th>`).join("")}
-    <th>外貨単価</th><th>外貨小計</th>${FX_TH}<th>円換算原価</th><th>売価(円)</th><th>粗利</th><th>粗利率</th><th>課税区分</th><th>備考</th><th></th></tr>
+    <th>外貨単価(${esc(S.fx.currency)})</th><th>外貨小計</th><th>円換算原価(自動)</th><th>売価(円)</th><th>粗利</th><th>粗利率</th><th>課税区分</th><th>備考</th><th></th></tr>
     ${body}</table></div>${addBtn("partner."+key,"行を追加")}`;
 }
 function secPartner(C){
@@ -749,7 +778,7 @@ function secPartner(C){
       ${F("提携先費用 小計(税別売価)", comp(fmt(c.sell + cg.sell)+"円","big"))}
       ${F("うちゲスト/企業訪問(提携先経由)", comp(fmt(cg.sell)+"円"))}
     </div>
-    <p class="hint">現地提携先への支払い分はfreee転記サマリーで「現地提携先プログラム費」に合算されます。内訳は下記カテゴリ別に確認できます。</p>
+    <p class="hint">円換算は共通設定を自動使用:計算レート <strong>${commonRate().toFixed(4)}</strong> / 現地税 <strong>${esc(S.fx.ltType)} ${num(S.fx.ltRate)}%(${S.fx.ltMode==="incl"?"税込":S.fx.ltMode==="excl"?"税別・原価に加算":"未確認"})</strong>(変更は「為替・計算レート」で)。freee転記では「現地提携先プログラム費」に合算されます。</p>
     ${partnerTable(C,"program","5-1. プログラム費用・会場費",[["qty","数量"],["desc","内容/単位"]])}
     ${partnerTable(C,"party","5-2. 懇親会",[["people","対象人数"],["times","回数"]])}
     ${partnerTable(C,"transport","5-3. 交通費・空港送迎",[["desc","内容"],["times","回数"],["vehicles","台数"]])}
@@ -960,7 +989,8 @@ function secTax(C){
       ${F("粗利率", comp(pct(t.gpRate), "big "+gpCls(t.gpRate)))}
       ${F("課税対象売上合計", comp(fmt(t.taxableEx)+"円"))}
       ${F("非課税・不課税等売上合計", comp(fmt(t.nonTaxEx)+"円"))}
-      ${F("消費税額("+num(S.taxRate)+"%・明細ごと計算)", comp(fmt(t.tax)+"円"))}
+      ${S.taxMode === "included" ? F("消費税", comp("限定提携会社の見積に含む")) :
+        F("消費税額("+num(S.taxRate)+"%・明細ごと計算)", comp(fmt(t.tax)+"円"))}
       ${F("税込売価合計", comp(fmt(t.inc)+"円 / "+man(t.inc),"big"))}
     </div>
     <p class="hint">粗利率の目安:20%未満は黄色、10%未満は赤で表示されます。</p>
@@ -970,6 +1000,7 @@ function secTax(C){
       <tfoot><tr><td>合計</td><td class="r">${fmt(t.ex)}</td><td class="r">${fmt(t.cost)}</td>
       <td class="r">${fmt(t.gp)}</td><td class="r">${pct(t.gpRate)}</td><td class="r">${fmt(t.tax)}</td></tr></tfoot>
     </table></div>
+    ${S.taxMode === "included" ? `<div class="notebox">※ 消費税は限定提携会社からの見積もりに含まれる前提のため、本見積では消費税を加算していません。</div>` : ""}
     ${warns.map(w=>`<div class="alertbox">⚠ ${w}</div>`).join("")}
   </div></section>`;
 }
@@ -1003,6 +1034,7 @@ function secFreee(C){
       <tfoot><tr><td>合計</td><td></td><td></td><td></td><td class="r">${fmt(t.ex)}</td><td class="r">${fmt(t.tax)}</td>
       <td class="r">${fmt(t.inc)}</td><td class="r man">${man(t.inc)}</td><td></td></tr></tfoot>
     </table></div>
+    ${S.taxMode === "included" ? `<div class="notebox">※ 消費税は限定提携会社からの見積もりに含まれる前提のため加算していません。</div>` : ""}
     ${C.flightNote ? `<div class="notebox">※ 航空券は貴社直接手配、または旅行会社から貴社へ直接請求を想定しており、当社見積には含めておりません。</div>` : ""}
     ${C.warn.ltUnknown ? `<div class="alertbox">⚠ 現地税(GST/VAT)が未確認の項目が ${C.warn.ltUnknown} 件あります。原価が変わる可能性があります。</div>` : ""}
   </div></section>`;
@@ -1068,7 +1100,7 @@ function render(){
    行テンプレート(追加ボタン用)
    ===================================================================== */
 const ROW_TPL = {
-  "preRows": () => ({ id:uid(), name:"", lecturer:"", times:"1", hours:"1", days:"1", sell:"", cost:"", taxCat:"課税", note:"" }),
+  "preRows": () => ({ id:uid(), name:"", lecturer:"", times:"1", hours:"1", days:"1", sell:"", gpIn:"0", taxCat:"課税", note:"" }),
   "cm": () => ({ id:uid(), company:"", preCnt:"1", localCnt:"2", postCnt:"0", hoursPer:"1", unit:"50000", costRate:"50", taxCat:"課税", note:"" }),
   "partner.program": () => Object.assign({ id:uid(), name:"", desc:"", qty:"1", fxUnit:"", sell:"", taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
   "partner.party": () => Object.assign({ id:uid(), name:"", people:String(stayCount()), times:"1", fxUnit:"", sell:"", taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
@@ -1094,17 +1126,44 @@ function tblArray(key){
 let raf = null;
 function scheduleRender(){ if (raf) return; raf = requestAnimationFrame(() => { raf = null; render(); }); }
 
+/* 日本語入力(IME)中は再描画しない。確定時に反映する。 */
+let composing = false;
+document.addEventListener("compositionstart", () => { composing = true; });
+document.addEventListener("compositionend", e => {
+  composing = false;
+  const p = e.target.dataset && e.target.dataset.p;
+  if (p){ setPath(p, e.target.value); scheduleRender(); }
+});
+
+/* 日付入力: 矢印連打を邪魔しないよう再描画せず反映。
+   渡航開始日を選んだら終了日の初期値に自動コピー。 */
+function handleDateInput(p, v){
+  setPath(p, v);
+  if (p === "basic.startDate" && v){
+    if (!S.basic.endDate || S.basic.endDate < v){
+      S.basic.endDate = v;
+      const el = document.querySelector('[data-p="basic.endDate"]');
+      if (el) el.value = v;
+    }
+  }
+  save();
+}
+
 document.addEventListener("input", e => {
+  if (composing || e.isComposing) return;
   const p = e.target.dataset && e.target.dataset.p;
   if (!p) return;
+  if (e.target.type === "date"){ handleDateInput(p, e.target.value); return; }
   if (e.target.dataset.t === "bool") setPath(p, e.target.checked);
   else setPath(p, e.target.value);
   scheduleRender();
 });
 document.addEventListener("change", e => {
   if (e.target.id === "casesel"){ setActiveCase(e.target.value); render(); window.scrollTo({top:0}); return; }
+  if (composing || e.isComposing) return;
   const p = e.target.dataset && e.target.dataset.p;
   if (!p) return;
+  if (e.target.type === "date"){ handleDateInput(p, e.target.value); return; }
   if (e.target.dataset.t === "bool") setPath(p, e.target.checked);
   else setPath(p, e.target.value);
   scheduleRender();
@@ -1197,7 +1256,7 @@ document.getElementById("filein").addEventListener("change", e => {
       const obj = JSON.parse(rd.result);
       if (!obj.patterns || !obj.basic) throw new Error("形式が違います");
       obj.id = uid(); obj.updatedAt = Date.now();
-      ROOT.cases.push(obj); setActiveCase(obj.id);
+      ROOT.cases.push(obj); setActiveCase(obj.id); migrate();
       if (!S.patterns.find(p => p.id === S.active)) S.active = S.patterns[0].id;
       render();
       alert("新しい案件として読み込みました。");
@@ -1209,5 +1268,6 @@ document.getElementById("filein").addEventListener("change", e => {
 
 /* ---------- init ---------- */
 load();
+migrate();
 renderNav();
 render();
