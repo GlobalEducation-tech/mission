@@ -1185,16 +1185,39 @@ function secCompare(){
   const cols = S.patterns.map(p => ({ p, c: computeAll(p.data) }));
   const row = (lab, fn, cls="") =>
     `<tr><td>${lab}</td>${cols.map(({p,c}) => `<td class="r ${cls}">${fn(p,c)}</td>`).join("")}</tr>`;
+
+  /* freee転記用明細と同じ項目で横並び比較(税別金額)。
+     ラベルごとに集計し、パターンに存在しない項目は「—」。 */
+  const order = [];
+  const seen = new Set();
+  for (const { c } of cols)
+    for (const l of c.freee){
+      if (l.excluded) continue;
+      if (!seen.has(l.label)){ seen.add(l.label); order.push({ label: l.label, subtotal: !!l.subtotal }); }
+    }
+  const maps = cols.map(({ c }) => {
+    const m = {};
+    for (const l of c.freee){ if (l.excluded) continue; m[l.label] = (m[l.label] || 0) + l.ex; }
+    return m;
+  });
+  const itemRows = order.map(o =>
+    `<tr${o.subtotal ? ' style="background:#eef3f8;font-weight:700"' : ""}><td>${esc(o.label)}</td>` +
+    maps.map(m => `<td class="r">${m[o.label] != null ? fmt(m[o.label]) : "—"}</td>`).join("") + `</tr>`).join("");
+
   return `<section class="card" id="sec-compare">${secH(16,"パターン比較一覧")}
   <div class="body">
-    <p class="hint">上部のパターンタブから「このパターンを複製」で新パターンを作成できます。案件名・顧客名以外(日程・参加者数・国・費用)はすべてパターンごとに独立しており、複製後の編集は互いに影響しません。</p>
+    <p class="hint">freee転記用明細と同じ項目(税別金額)を全パターン横並びで比較します。パターンに存在しない項目は「—」。上部のパターンタブから「このパターンを複製」で新パターンを作成できます。案件名・顧客名以外はパターンごとに独立です。</p>
     <div class="tw"><table class="tbl sumtbl">
       <tr><th>項目</th>${cols.map(({p}) => `<th>${esc(p.name||"(無題)")}${p.id===S.active?' <span class="badge ok">表示中</span>':""}</th>`).join("")}</tr>
       ${row("参加者数", p => fmt(num(p.data.basic.participants))+" 名")}
       ${row("期間", p => { const n = tripNightsFor(p.data.basic);
         return n != null ? n + "泊" + (n+1) + "日(" + tripWeeksFor(p.data.basic) + "週間)" : "—"; })}
+      <tr><td colspan="${cols.length+1}" style="background:#f2f5f8;font-weight:700;color:var(--accent)">freee転記用明細(税別)</td></tr>
+      ${itemRows}
+      <tr><td colspan="${cols.length+1}" style="background:#f2f5f8;font-weight:700;color:var(--accent)">合計</td></tr>
       ${row("税別合計", (p,c) => fmt(c.totals.ex)+"円")}
       ${row("(万円)", (p,c) => man(c.totals.ex), "man")}
+      ${row("消費税", (p,c) => fmt(c.totals.tax)+"円")}
       ${row("税込合計", (p,c) => fmt(c.totals.inc)+"円")}
       ${row("1人あたり税別", (p,c) => fmt(c.totals.ppEx)+"円")}
       ${row("1人あたり税込", (p,c) => fmt(c.totals.ppInc)+"円")}
