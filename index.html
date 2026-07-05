@@ -17,7 +17,8 @@ body{margin:0;font-family:"Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic
   background:var(--bg);color:var(--ink);font-size:13px;line-height:1.55}
 
 /* ---- top bar ---- */
-#topbar{position:sticky;top:0;z-index:50;background:var(--ink);color:#fff;
+#hdr{position:sticky;top:0;z-index:50}
+#topbar{background:var(--ink);color:#fff;
   display:flex;align-items:center;gap:16px;padding:8px 16px;flex-wrap:wrap}
 #topbar .brand{font-weight:700;font-size:14px;letter-spacing:.04em;white-space:nowrap}
 #topbar .brand small{display:block;font-weight:400;font-size:10px;opacity:.7;letter-spacing:.12em}
@@ -44,7 +45,7 @@ body{margin:0;font-family:"Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic
 .cloudmsg{font-size:12px;margin-top:8px;color:var(--sub)}
 
 /* ---- pattern bar ---- */
-#patbar{position:sticky;top:52px;z-index:40;background:#fff;border-bottom:2px solid var(--line);
+#patbar{background:#fff;border-bottom:2px solid var(--line);
   display:flex;align-items:center;gap:6px;padding:6px 16px;overflow-x:auto}
 #patbar .ptab{border:1px solid var(--line);background:#f5f7fa;border-radius:6px 6px 0 0;
   padding:6px 14px;cursor:pointer;white-space:nowrap;font-size:12px;color:var(--sub)}
@@ -134,6 +135,7 @@ details.help li{margin:2px 0}
 </style>
 </head>
 <body>
+<div id="hdr">
 <div id="topbar">
   <div class="brand">GETC 海外研修 価格計算<small>OVERSEAS TRAINING QUOTATION</small></div>
   <div id="casectl"></div>
@@ -146,6 +148,7 @@ details.help li{margin:2px 0}
   </div>
 </div>
 <div id="patbar"></div>
+</div>
 <div id="layout">
   <nav id="nav"></nav>
   <main id="main"></main>

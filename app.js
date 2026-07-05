@@ -198,6 +198,10 @@ function tripNights(){
   const d = (new Date(e) - new Date(s)) / 86400000;
   return d >= 0 ? Math.round(d) : null;
 }
+function tripWeeks(){
+  const n = tripNights();
+  return n != null ? Math.ceil((n + 1) / 7) : null;
+}
 function stayCount(){
   const b = S.basic;
   return num(b.participants) + num(b.geStaff) + num(b.clientStaff)
@@ -255,10 +259,11 @@ function computeAll(pd){
   const ppl = num(S.basic.participants);
   for (const row of pd.pre.rows){
     const mat = num(row.matUnit) * ppl;             // 教材費 = 単価 × 参加者数(粗利なし)
-    const sell = num(row.sell) + mat;
+    const base = num(row.sell) + mat;
+    const sell = base > 0 ? Math.ceil(base / 100000) * 100000 : 0;   // 10万円単位に切り上げ(交通費等込み)
     const gp = row.gpIn != null ? num(row.gpIn) : num(row.sell) - num(row.cost);
     const r = finish(sell, sell - gp, row.taxCat, tr);
-    r.mat = mat;
+    r.mat = mat; r.base = base;
     r.taxCatUsed = row.taxCat; R[row.id] = r; track(r); acc(cat.pre, r);
     D("事前研修:" + (row.name || "(無名)") + (mat ? "(教材費込)" : ""), r);
   }
@@ -366,11 +371,15 @@ function computeAll(pd){
   /* --- ホテル --- */
   cat.hotel = zero();
   const hotelNights = tripNights() || 0;
+  const hPeople = stayCount();
   for (const row of pd.hotels){
     const fxSub = num(row.rooms) * hotelNights * num(row.fxUnit);
     const raw = fxCost(gFx, fxSub);
     const cost = ceilMan(raw);
-    const r = finish(cost, cost, row.taxCat, tr);   // 売価 = 円換算原価
+    const unitPP = hPeople > 0 && cost > 0 ? Math.ceil(cost / hPeople) : cost;   // 1人あたり(円切上げ)
+    const sellH = hPeople > 0 && cost > 0 ? unitPP * hPeople : cost;
+    const r = finish(sellH, cost, row.taxCat, tr);   // 売価 = 1人単価 × 宿泊人数(端数分は粗利)
+    r.unitPP = unitPP; r.hPeople = hPeople;
     r.fxSub = fxSub; r.raw = raw; r.lt = ltFlag(gFx); r.taxCatUsed = row.taxCat;
     R[row.id] = r;
     if (row.on){ track(r); trackLt(r.lt); acc(cat.hotel, r);
@@ -483,8 +492,10 @@ function computeAll(pd){
   if (pd.ma.on) L(`ミッション企業手配費${pd.ma.company ? "(" + pd.ma.company + ")" : ""}`, R["ma"], pd.ma.taxCat);
 
   for (const row of pd.hotels){ if (!row.on) continue;
-    L(`ホテル費${row.name ? "(" + row.name + ")" : ""}`, R[row.id], row.taxCat,
-      { note: `${num(row.rooms)}室 × ${hotelNights}泊` }); }
+    const rr = R[row.id];
+    L(`ホテル費${row.name ? "(" + row.name + ")" : ""}`, rr, row.taxCat,
+      { unit: rr.unitPP, qty: rr.hPeople || 1, qtyUnit: "名",
+        note: `${num(row.rooms)}室 × ${hotelNights}泊。1人あたり × 宿泊人数` }); }
   L("航空券", R["flight"], f.taxCat,
     { unit: num(f.unit), qty: fPeople, qtyUnit: "名",
       note: fDirect ? FLIGHT_NOTE : (num(f.unit) ? "" : "単価未入力のため0円(見積に含めない場合は空欄のまま)") });
@@ -709,6 +720,7 @@ function secBasic(){
     ${F("講師の人数", ninp("basic.lecturers", b.lecturers))}
     ${F("講師分の加算", chk("basic.lecturerStay", b.lecturerStay, "宿泊に加算") + " " + chk("basic.lecturerFlight", b.lecturerFlight, "航空券に加算"))}
     ${F("宿泊数(日程から自動)", comp(tripNights() != null ? tripNights() + "泊" + (tripNights()+1) + "日" : "日程を入力してください"))}
+    ${F("週数(日程から自動)", comp(tripWeeks() != null ? tripWeeks() + "週間" : "—"))}
     ${F("合計宿泊人数(自動)", comp(fmt(stayCount())+" 名"))}
     ${F("班数", ninp("basic.groups", b.groups))}
     ${F("1班あたり人数", comp(perGroup ? perGroup.toFixed(1)+" 名" : "—"))}
@@ -767,7 +779,7 @@ function secPre(C){
       ${td(inp(`pat.pre.${key}.note`, it.note,"w-l"))}<td></td></tr>`; };
   const rows = pre.rows.map((row,i) => { const bp = `pat.pre.rows.${i}`, r = C.R[row.id];
     return `<tr>${td("")}${td(inp(bp+".name",row.name,"w-l","研修名") + inp(bp+".lecturer",row.lecturer,"w-m","講師名"))}
-      ${td(ninp(bp+".sell",row.sell))}${td(comp(fmt(r.cost)))}
+      ${td(ninp(bp+".sell",row.sell) + `<div class="man">確定 ${fmt(r.sell)}円(10万切上げ)</div>`)}${td(comp(fmt(r.cost)))}
       ${td(ninp(bp+".gpIn",row.gpIn))}${td(comp(pct(r.gpRate), gpCls(r.gpRate)))}${td(taxSel(bp+".taxCat",row.taxCat))}
       ${td(ninp(bp+".matUnit",row.matUnit,"w-s") + `<div class="man">合計 ${fmt(r.mat||0)}円(×${num(S.basic.participants)}名・粗利なし)</div>`)}
       ${td(`<span class="man">回数</span>`+ninp(bp+".times",row.times,"w-s")
@@ -778,7 +790,7 @@ function secPre(C){
   return `<section class="card" id="sec-pre">${secH(3,"事前研修・国内準備")}
   <div class="body"><div class="tw"><table class="tbl">
     <tr><th></th><th>項目</th><th>売価</th><th>原価</th><th>粗利</th><th>粗利率</th><th>課税区分</th><th>教材費単価/人</th><th>回数・時間・備考</th><th></th></tr>
-    <tr><td colspan="10" class="hint" style="padding:4px 8px">キックオフ・オリエンは原価を入力(粗利は自動)。追加した事前研修行は<strong>粗利を入力</strong>(原価は自動計算)。教材費は単価×参加者数で自動加算(粗利なし・売価と原価の両方に同額計上)。</td></tr>
+    <tr><td colspan="10" class="hint" style="padding:4px 8px">キックオフ・オリエンは原価を入力(粗利は自動)。追加した事前研修行は<strong>粗利を入力</strong>(原価は自動計算)。教材費は単価×参加者数で自動加算(粗利なし)。事前研修行の売価は教材費加算後に<strong>10万円単位へ切り上げ</strong>(交通費等込み。切り上げ差額は原価側に計上され、粗利は入力どおり)。</td></tr>
     ${fixedRow("kickoff","キックオフ(定額)")}
     ${fixedRow("orient","出発前オリエンテーション(定額)")}
     ${rows}
@@ -978,7 +990,7 @@ function secHotel(C){
       ${td(comp(fmt(stayCount())+"名"))}${td(comp((tripNights() != null ? tripNights() : "—")+"泊"))}${td(ninp(bp+".rooms",row.rooms,"w-s"))}
       ${td(ninp(bp+".fxUnit",row.fxUnit))}
       ${td(comp(r.fxSub.toLocaleString("ja-JP",{maximumFractionDigits:2})))}
-      ${td(`<div class="comp"><strong>${fmt(r.cost)}</strong>円<div class="man">${man(r.cost)}${r.raw !== r.cost ? " | 切上げ前 " + fmt(r.raw) + "円" : ""}</div></div>`)}
+      ${td(`<div class="comp"><strong>${fmt(r.sell)}</strong>円<div class="man">${man(r.sell)} | 1人 ${fmt(r.unitPP)}円 × ${r.hPeople}名 | 原価 ${fmt(r.cost)}円(切上げ前 ${fmt(r.raw)}円)</div></div>`)}
       ${td(sel(bp+".breakfast",row.breakfast,["込み","別","不明"],"w-s"))}
       ${td(sel(bp+".taxSvc",row.taxSvc,["込み","別","不明"],"w-s"))}
       ${td(taxSel(bp+".taxCat",row.taxCat))}${td(inp(bp+".note",row.note,"w-m"))}
