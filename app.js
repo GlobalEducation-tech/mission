@@ -375,13 +375,14 @@ function computeAll(pd){
   /* --- 航空券 --- */
   cat.flight = zero();
   const f = pd.flight;
-  const fIncluded = f.arrange === "GE見積に含める";
+  const fDirect = (f.arrange === "貴社直接手配" || f.arrange === "旅行会社から貴社へ直接請求");
   const fPeople = num(S.basic.participants) + num(S.basic.geStaff) + num(S.basic.clientStaff);
-  { const sell = fPeople * num(f.unit);
+  { const sell = fPeople * num(f.unit);   // 単価が空欄なら0円=実質含まれない
     const r = finish(sell, sell, f.taxCat, tr);   // 原価・粗利は扱わない(粗利0)
     r.people = fPeople;
     r.taxCatUsed = f.taxCat; R["flight"] = r;
-    if (fIncluded){ track(r); acc(cat.flight, r); D("航空券", r); }
+    track(r); acc(cat.flight, r);
+    if (sell) D("航空券", r);
   }
 
   /* --- アテンド --- */
@@ -417,7 +418,7 @@ function computeAll(pd){
   let mgmtBase = 0;
   for (const k in targetMap) if (tgt[k]) mgmtBase += targetMap[k];
   const mgmtSell = rnd(mgmtBase * num(pd.mgmt.ratePct)/100);
-  { const r = finish(mgmtSell, num(pd.mgmt.cost), pd.mgmt.taxCat, tr);
+  { const r = finish(mgmtSell, 0, pd.mgmt.taxCat, tr);   // 全額が粗利
     r.base = mgmtBase; r.taxCatUsed = pd.mgmt.taxCat; R["mgmt"] = r; track(r);
     cat.mgmt = zero(); acc(cat.mgmt, r);
     D("企画・管理費", r);
@@ -487,11 +488,9 @@ function computeAll(pd){
   for (const row of pd.hotels){ if (!row.on) continue;
     L(`ホテル費${row.name ? "(" + row.name + ")" : ""}`, R[row.id], row.taxCat,
       { note: `${num(row.rooms)}室 × ${num(row.nights)}泊` }); }
-  if (fIncluded)
-    L("航空券", R["flight"], f.taxCat, { unit: num(f.unit), qty: fPeople, qtyUnit: "名" });
-  else
-    freee.push({ label: "航空券", taxCat: "対象外", unit: null, qty: null, qtyUnit: "",
-      ex: 0, tax: 0, inc: 0, note: FLIGHT_NOTE, excluded: true });
+  L("航空券", R["flight"], f.taxCat,
+    { unit: num(f.unit), qty: fPeople, qtyUnit: "名",
+      note: fDirect ? FLIGHT_NOTE : (num(f.unit) ? "" : "単価未入力のため0円(見積に含めない場合は空欄のまま)") });
   ST("ホテル・航空券 合計", cat.hotel, cat.flight);
 
   for (const [key, rows, lab] of [["al", pd.al, "現地アテンド費"], ["ad", pd.ad, "国内アテンド費"]])
@@ -512,8 +511,7 @@ function computeAll(pd){
       tax: total.tax, inc: total.sell + total.tax,
       taxableEx: total.taxable, nonTaxEx: total.sell - total.taxable,
       ppEx: rnd(total.sell / pp), ppInc: rnd((total.sell + total.tax) / pp) },
-    flightNote: (f.arrange === "貴社直接手配" || f.arrange === "旅行会社から貴社へ直接請求"),
-    flightIncluded: fIncluded,
+    flightNote: fDirect,
     warn: { taxUnknown, ltUnknown, ltExcl }
   };
 }
@@ -1002,7 +1000,6 @@ function secHotel(C){
 /* --- 10. 航空券 --- */
 function secFlight(C){
   const f = activePat().data.flight, r = C.R["flight"];
-  const excluded = !C.flightIncluded;
   return `<section class="card" id="sec-flight">${secH(10,"航空券")}
   <div class="body"><div class="grid">
     ${F("手配区分", sel("pat.flight.arrange", f.arrange,
@@ -1013,7 +1010,8 @@ function secFlight(C){
     ${F("課税区分", taxSel("pat.flight.taxCat", f.taxCat))}
     ${F("備考", inp("pat.flight.note", f.note))}
   </div>
-  ${excluded ? `<div class="notebox">この設定では航空券は見積合計に含まれません。freee転記サマリーの航空券行に次の注記が表示されます:<br><strong>「${FLIGHT_NOTE}」</strong></div>` : `<div class="hint">航空券は見積合計とfreee転記に含まれます(単価 × 対象人数)。</div>`}
+  <p class="hint">合計金額は単価 × 対象人数で自動計算され、見積合計に含まれます。<strong>見積に含めたくない場合は単価を空欄にしてください</strong>(0円として扱われます)。</p>
+  ${C.flightNote ? `<div class="notebox">手配区分が直接手配のため、freee転記サマリーの航空券行に次の注記が表示されます:<br><strong>「${FLIGHT_NOTE}」</strong></div>` : ""}
   </div></section>`;
 }
 
@@ -1050,9 +1048,7 @@ function secMgmt(C){
     <div class="grid">
       ${F("企画・管理費率(%)", ninp("pat.mgmt.ratePct", m.ratePct))}
       ${F("対象金額合計(税別売価)", comp(fmt(r.base)+"円"))}
-      ${F("企画・管理費(自動)", comp(fmt(r.sell)+"円","big"))}
-      ${F("原価(基本0円)", ninp("pat.mgmt.cost", m.cost))}
-      ${F("粗利", comp(fmt(r.gp)+"円", gpCls(r.gpRate)))}
+      ${F("企画・管理費(自動・全額が粗利)", comp(fmt(r.sell)+"円","big"))}
       ${F("課税区分", taxSel("pat.mgmt.taxCat", m.taxCat))}
       ${F("備考", inp("pat.mgmt.note", m.note))}
     </div>
