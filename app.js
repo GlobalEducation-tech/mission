@@ -87,7 +87,7 @@ function defaultState(){
   return {
     basic: { project:"海外ミッション型研修 価格計算", client:"", country:"シンガポール", city:"シンガポール",
       startDate:"", endDate:"", participants:"16", geStaff:"1", clientStaff:"1",
-      stayOverride:"", groups:"4", note:"" },
+      lecturers:"0", lecturerStay:false, lecturerFlight:false, groups:"4", note:"" },
     fx: { currency:"SGD", tts:"115.00", markupPct:"105", ltType:"GST", ltMode:"incl", ltRate:"9" },
     taxRate: "10",
     patterns: [ { id: pid, name:"1週間ライト", comment:"", data: defaultPatternData() } ],
@@ -142,6 +142,7 @@ function activePat(){ return S.patterns.find(p => p.id === S.active) || S.patter
 /* 旧データへの後付けフィールド補完 */
 function migrate(){
   for (const c of ROOT.cases){
+    if (c.basic.lecturers == null){ c.basic.lecturers = "0"; c.basic.lecturerStay = false; c.basic.lecturerFlight = false; }
     if (c.fx.ltType == null){ c.fx.ltType = "GST"; c.fx.ltMode = "incl"; c.fx.ltRate = "9"; }
     for (const p of c.patterns){
       for (const r of p.data.pre.rows)
@@ -199,8 +200,8 @@ function tripNights(){
 }
 function stayCount(){
   const b = S.basic;
-  return b.stayOverride !== "" ? num(b.stayOverride)
-       : num(b.participants) + num(b.geStaff) + num(b.clientStaff);
+  return num(b.participants) + num(b.geStaff) + num(b.clientStaff)
+       + (b.lecturerStay ? num(b.lecturers) : 0);
 }
 
 /* 外貨行 → 円換算原価。現地税(税別)は外貨小計に加算してから換算。 */
@@ -306,17 +307,6 @@ function computeAll(pd){
     D(catLab + ":" + (row.name || "(無名)"), r);
   }
 
-  /* --- 提携先費用を1人あたり単価 × 参加者数に整形(端数は切り上げて粗利に計上) --- */
-  let ppUnit = null;
-  if (ppl > 0 && cat.partner.sell > 0){
-    ppUnit = Math.ceil(cat.partner.sell / ppl);
-    const adj = ppUnit * ppl - cat.partner.sell;
-    if (adj > 0){
-      cat.partner.sell += adj; cat.partner.gp += adj;
-      D("提携先プログラム費 端数調整(1人単価切上げ)", { sell: adj, cost: 0, gp: adj, gpRate: 1, tax: 0 });
-    }
-  }
-
   /* --- ゲストスピーカー / 企業訪問 --- */
   cat.guestPartner = zero(); cat.guestDirect = zero();
   for (const row of pd.guests){
@@ -359,10 +349,25 @@ function computeAll(pd){
       D("バディ(現地稼働)", rL); if (rM.sell || rM.cost) D("バディ(オンラインMTG)", rM); }
   }
 
+  /* --- 海外プログラム費用(限定提携先 + バディ)を1人あたり単価 × 参加者数に整形。
+         単価は万円単位に切り上げ、端数は粗利に計上。 --- */
+  let ppUnit = null;
+  { const lump = cat.partner.sell + cat.buddy.sell;
+    if (ppl > 0 && lump > 0){
+      ppUnit = Math.ceil(lump / ppl / 10000) * 10000;
+      const adj = ppUnit * ppl - lump;
+      if (adj > 0){
+        cat.partner.sell += adj; cat.partner.gp += adj;
+        D("海外プログラム費用 端数調整(1人単価を万単位に切上げ)", { sell: adj, cost: 0, gp: adj, gpRate: 1, tax: 0 });
+      }
+    }
+  }
+
   /* --- ホテル --- */
   cat.hotel = zero();
+  const hotelNights = tripNights() || 0;
   for (const row of pd.hotels){
-    const fxSub = num(row.rooms) * num(row.nights) * num(row.fxUnit);
+    const fxSub = num(row.rooms) * hotelNights * num(row.fxUnit);
     const raw = fxCost(gFx, fxSub);
     const cost = ceilMan(raw);
     const r = finish(cost, cost, row.taxCat, tr);   // 売価 = 円換算原価
@@ -376,7 +381,8 @@ function computeAll(pd){
   cat.flight = zero();
   const f = pd.flight;
   const fDirect = (f.arrange === "貴社直接手配" || f.arrange === "旅行会社から貴社へ直接請求");
-  const fPeople = num(S.basic.participants) + num(S.basic.geStaff) + num(S.basic.clientStaff);
+  const fPeople = num(S.basic.participants) + num(S.basic.geStaff) + num(S.basic.clientStaff)
+    + (S.basic.lecturerFlight ? num(S.basic.lecturers) : 0);
   { const sell = fPeople * num(f.unit);   // 単価が空欄なら0円=実質含まれない
     const r = finish(sell, sell, f.taxCat, tr);   // 原価・粗利は扱わない(粗利0)
     r.people = fPeople;
@@ -462,13 +468,13 @@ function computeAll(pd){
       { unit: num(row.unit), qty: R[row.id].totalH, qtyUnit: "時間" });
   ST("コンサルティング 合計", cat.consult);
 
-  { const c = zero(); acc(c, cat.partner);
+  { const c = zero(); acc(c, cat.partner); acc(c, cat.buddy);
     const perPerson = ppUnit != null;
-    freee.push({ label: `現地提携先プログラム費(${pd.partner.name || "現地提携先"})`,
-      taxCat: c.tax > 0 ? "課税" : (pRows.length ? pRows[0][0].taxCat : "不課税"),
+    freee.push({ label: "海外プログラム費用",
+      taxCat: c.tax > 0 ? (c.taxable === c.sell ? "課税" : "混在") : "非課税等",
       unit: perPerson ? ppUnit : c.sell, qty: perPerson ? ppl : 1, qtyUnit: perPerson ? "名" : "式",
       ex: c.sell, tax: c.tax, inc: c.sell + c.tax,
-      note: "プログラム・会場費/懇親会/交通費等を合算" + (perPerson ? "。1人あたり単価×参加者数" : ""), excluded: false }); }
+      note: `限定提携先(${pd.partner.name || "現地提携先"})プログラム費・バディ手配費(現地/渡航前オンライン)を合算。1人あたり単価(万円単位)× 参加者数`, excluded: false }); }
 
   for (const row of pd.guests){ if (!row.on) continue;
     L(`${row.type}${row.name ? "(" + row.name + ")" : ""}`, R[row.id], row.taxCat,
@@ -476,18 +482,9 @@ function computeAll(pd){
 
   if (pd.ma.on) L(`ミッション企業手配費${pd.ma.company ? "(" + pd.ma.company + ")" : ""}`, R["ma"], pd.ma.taxCat);
 
-  if (pd.buddy.on){
-    L(`バディ手配費(現地稼働${pd.buddy.agency ? "・" + pd.buddy.agency : ""})`, R["buddy-local"], pd.buddy.taxCat,
-      { unit: num(pd.buddy.unit), qty: R["buddy-local"].totalH, qtyUnit: "時間" });
-    if (R["buddy-mtg"].sell)
-      L("バディ手配費(渡航前オンラインMTG)", R["buddy-mtg"], pd.buddy.taxCat,
-        { unit: num(pd.buddy.mtgUnit), qty: R["buddy-mtg"].totalCnt, qtyUnit: "回" });
-    ST("バディ手配費 合計", cat.buddy);
-  }
-
   for (const row of pd.hotels){ if (!row.on) continue;
     L(`ホテル費${row.name ? "(" + row.name + ")" : ""}`, R[row.id], row.taxCat,
-      { note: `${num(row.rooms)}室 × ${num(row.nights)}泊` }); }
+      { note: `${num(row.rooms)}室 × ${hotelNights}泊` }); }
   L("航空券", R["flight"], f.taxCat,
     { unit: num(f.unit), qty: fPeople, qtyUnit: "名",
       note: fDirect ? FLIGHT_NOTE : (num(f.unit) ? "" : "単価未入力のため0円(見積に含めない場合は空欄のまま)") });
@@ -709,9 +706,10 @@ function secBasic(){
     ${F("参加者数 *", ninp("basic.participants", b.participants))}
     ${F("GE事務局人数", ninp("basic.geStaff", b.geStaff))}
     ${F("先方事務局人数", ninp("basic.clientStaff", b.clientStaff))}
+    ${F("講師の人数", ninp("basic.lecturers", b.lecturers))}
+    ${F("講師分の加算", chk("basic.lecturerStay", b.lecturerStay, "宿泊に加算") + " " + chk("basic.lecturerFlight", b.lecturerFlight, "航空券に加算"))}
     ${F("宿泊数(日程から自動)", comp(tripNights() != null ? tripNights() + "泊" + (tripNights()+1) + "日" : "日程を入力してください"))}
-    ${F("合計宿泊人数(空欄=自動)", ninp("basic.stayOverride", b.stayOverride) )}
-    ${F("宿泊人数(計算値)", comp(fmt(stayCount())+" 名"))}
+    ${F("合計宿泊人数(自動)", comp(fmt(stayCount())+" 名"))}
     ${F("班数", ninp("basic.groups", b.groups))}
     ${F("1班あたり人数", comp(perGroup ? perGroup.toFixed(1)+" 名" : "—"))}
     ${F("パターン備考", inp("patComment", p.comment))}
@@ -977,7 +975,7 @@ function secHotel(C){
     return `<tr class="${row.on?"":"off"}">${td(onSw(bp+".on",row.on))}
       ${td(inp(bp+".name",row.name,"w-l","ホテル名") + inp(bp+".city",row.city,"w-m","都市"))}
       ${td(inp(bp+".roomType",row.roomType,"w-s","部屋タイプ"))}
-      ${td(ninp(bp+".people",row.people,"w-s"))}${td(ninp(bp+".nights",row.nights,"w-s"))}${td(ninp(bp+".rooms",row.rooms,"w-s"))}
+      ${td(comp(fmt(stayCount())+"名"))}${td(comp((tripNights() != null ? tripNights() : "—")+"泊"))}${td(ninp(bp+".rooms",row.rooms,"w-s"))}
       ${td(ninp(bp+".fxUnit",row.fxUnit))}
       ${td(comp(r.fxSub.toLocaleString("ja-JP",{maximumFractionDigits:2})))}
       ${td(`<div class="comp"><strong>${fmt(r.cost)}</strong>円<div class="man">${man(r.cost)}${r.raw !== r.cost ? " | 切上げ前 " + fmt(r.raw) + "円" : ""}</div></div>`)}
@@ -987,9 +985,9 @@ function secHotel(C){
       ${td(delBtn("hotels",row.id))}</tr>`; }).join("");
   return `<section class="card" id="sec-hotel">${secH(9,"ホテル費用")}
   <div class="body">
-    <p class="hint">外貨小計 = 部屋数 × 宿泊数 × 1泊1室単価。円換算は共通設定(計算レート・現地税)を自動使用。宿泊対象人数の目安:${fmt(stayCount())}名 / 宿泊数の目安:${tripNights() != null ? tripNights() + "泊(日程から)" : "日程未入力"}。</p>
+    <p class="hint">宿泊対象人数(${fmt(stayCount())}名)と宿泊数(${tripNights() != null ? tripNights() + "泊" : "日程未入力"})は基本情報から自動反映。外貨小計 = 部屋数 × 宿泊数 × 1泊1室単価。${tripNights() == null ? '<strong style="color:#b3261e">渡航開始日・終了日を入力すると宿泊数が計算されます。</strong>' : ""}</p>
     <div class="tw"><table class="tbl">
-      <tr><th></th><th>ホテル名/都市</th><th>部屋タイプ</th><th>宿泊対象人数</th><th>宿泊数</th><th>部屋数</th>
+      <tr><th></th><th>ホテル名/都市</th><th>部屋タイプ</th><th>宿泊対象人数(自動)</th><th>宿泊数(自動)</th><th>部屋数</th>
       <th>1泊1室 外貨単価(${esc(S.fx.currency)})</th><th>外貨小計</th>
       <th>円換算原価=売価(自動・万切上げ)</th><th>朝食</th><th>税サ</th><th>課税区分</th><th>備考</th><th></th></tr>
       ${body}
@@ -1004,7 +1002,7 @@ function secFlight(C){
   <div class="body"><div class="grid">
     ${F("手配区分", sel("pat.flight.arrange", f.arrange,
         ["GE見積に含める","貴社直接手配","旅行会社から貴社へ直接請求","未定"]))}
-    ${F("対象人数(自動:参加者+GE事務局+先方事務局)", comp(fmt(r.people)+" 名"))}
+    ${F("対象人数(自動:参加者+事務局" + (S.basic.lecturerFlight ? "+講師" : "") + ")", comp(fmt(r.people)+" 名"))}
     ${F("1人あたり単価(円)", ninp("pat.flight.unit", f.unit))}
     ${F("合計金額(自動)", comp(fmt(r.sell)+"円","big"))}
     ${F("課税区分", taxSel("pat.flight.taxCat", f.taxCat))}
