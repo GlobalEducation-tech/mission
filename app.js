@@ -46,22 +46,22 @@ function defaultPatternData(){
       name:"inlingua Singapore", country:"シンガポール", city:"シンガポール", note:"",
       program: [
         Object.assign({ id:uid(), name:"プログラム費用", desc:"", qty:"1", unitLabel:"式", fxUnit:"",
-          sell:"", taxCat:"不課税", note:"" }, fxBlock("SGD",{ltRate:"9"}))
+          markup:"0", taxCat:"不課税", note:"" }, fxBlock("SGD",{ltRate:"9"}))
       ],
       party: [
         Object.assign({ id:uid(), name:"懇親会", people:"18", fxTotal:"",
-          sell:"", taxCat:"不課税", note:"" }, fxBlock("SGD",{ltRate:"9"}))
+          markup:"0", taxCat:"不課税", note:"" }, fxBlock("SGD",{ltRate:"9"}))
       ],
       transport: [
         Object.assign({ id:uid(), name:"空港送迎", desc:"往復", times:"2", vehicles:"1", fxUnit:"",
-          sell:"", taxCat:"不課税", note:"" }, fxBlock("SGD",{ltRate:"9"}))
+          markup:"0", taxCat:"不課税", note:"" }, fxBlock("SGD",{ltRate:"9"}))
       ],
       other: []
     },
     guests: [],
     ma: { on:true, company:"", agency:"", person:"", sell:"1000000", cost:"", taxCat:"課税", note:"" },
     buddy: { on:true, agency:"CURIO Japan", people:"4", daysPer:"5", hoursPerDay:"6", unit:"10000",
-             cost:"", mtgCnt:"1", mtgUnit:"10000", mtgCost:"", taxCat:"課税", note:"" },
+             costUnit:"10000", mtgCnt:"1", mtgUnit:"10000", mtgCost:"", taxCat:"課税", note:"" },
     hotels: [
       Object.assign({ id:uid(), on:true, name:"Hotel Chancellor", city:"シンガポール", roomType:"シングル",
         people:"18", nights:"6", rooms:"18", fxUnit:"230",
@@ -144,6 +144,10 @@ function migrate(){
         if (r.gpIn == null) r.gpIn = String(num(r.sell) - num(r.cost));
       for (const r of p.data.partner.party)
         if (r.fxTotal == null) r.fxTotal = String(num(r.people) * num(r.times) * num(r.fxUnit));
+      for (const k of ["program","party","transport","other"])
+        for (const r of p.data.partner[k]) if (r.markup == null) r.markup = "0";
+      for (const r of p.data.guests) if (r.markup == null) r.markup = "0";
+      if (p.data.buddy.costUnit == null) p.data.buddy.costUnit = p.data.buddy.unit || "10000";
     }
   }
 }
@@ -222,6 +226,9 @@ function computeAll(pd){
   const tr = num(S.taxRate);
   const R = {};                       // rowId → computed
   const cat = {};                     // カテゴリ集計
+  const detail = [];                  // 課税・粗利サマリー用の項目別内訳
+  const D = (label, r) => detail.push({ label, r });
+  const ceilMan = v => Math.ceil(v / 10000) * 10000;
   let taxUnknown = 0, ltUnknown = 0, ltExcl = 0;
   const track = r => { if (r.taxCatUsed === "未確認") taxUnknown++; };
   const trackLt = f => { if (f === "unknown") ltUnknown++; if (f === "excl") ltExcl++; };
@@ -229,17 +236,18 @@ function computeAll(pd){
   /* --- 事前研修・オリエンテーション --- */
   cat.pre = zero();
   const fixed = [["kickoff","キックオフ"],["orient","出発前オリエンテーション"]];
-  for (const [k] of fixed){
+  for (const [k, label] of fixed){
     const it = pd.pre[k];
     const r = finish(num(it.sell), num(it.cost), it.taxCat, tr);
     r.taxCatUsed = it.taxCat; R["pre-"+k] = r; track(r);
-    if (it.on) acc(cat.pre, r);
+    if (it.on){ acc(cat.pre, r); D(label, r); }
   }
   for (const row of pd.pre.rows){
     const sell = num(row.sell);
     const gp = row.gpIn != null ? num(row.gpIn) : sell - num(row.cost);
     const r = finish(sell, sell - gp, row.taxCat, tr);
     r.taxCatUsed = row.taxCat; R[row.id] = r; track(r); acc(cat.pre, r);
+    D("事前研修:" + (row.name || "(無名)"), r);
   }
 
   /* --- コンサルティング --- */
@@ -252,7 +260,7 @@ function computeAll(pd){
     const r = finish(sell, cost, c.taxCat, tr);
     Object.assign(r, { totalCnt, totalH, taxCatUsed: c.taxCat });
     R["cg"] = r; track(r);
-    if (c.on) acc(cat.consult, r);
+    if (c.on){ acc(cat.consult, r); D("コンサルティング(" + (c.name || "班別") + ")", r); }
   }
   for (const row of pd.cm){
     const totalH = (num(row.preCnt)+num(row.localCnt)+num(row.postCnt)) * num(row.hoursPer);
@@ -261,6 +269,7 @@ function computeAll(pd){
     const r = finish(sell, cost, row.taxCat, tr);
     Object.assign(r, { totalH, taxCatUsed: row.taxCat });
     R[row.id] = r; track(r); acc(cat.consult, r);
+    D("ミッション企業コンサル(" + (row.company || "未設定") + ")", r);
   }
 
   /* --- 現地提携先費用 --- */
@@ -268,30 +277,35 @@ function computeAll(pd){
   const gFx = { rateMode:"common", customRate:"", jpyCost:"",
     ltType: S.fx.ltType, ltMode: S.fx.ltMode, ltRate: S.fx.ltRate };
   const pRows = [
-    ...pd.partner.program.map(r => [r, num(r.qty) * num(r.fxUnit), false]),
-    ...pd.partner.party.map(r => [r, num(r.fxTotal), false]),
-    ...pd.partner.transport.map(r => [r, num(r.times) * num(r.vehicles) * num(r.fxUnit), true]),
-    ...pd.partner.other.map(r => [r, num(r.qty) * num(r.fxUnit), false])
+    ...pd.partner.program.map(r => [r, num(r.qty) * num(r.fxUnit), "プログラム/会場"]),
+    ...pd.partner.party.map(r => [r, num(r.fxTotal), "懇親会"]),
+    ...pd.partner.transport.map(r => [r, num(r.times) * num(r.vehicles) * num(r.fxUnit), "交通/送迎"]),
+    ...pd.partner.other.map(r => [r, num(r.qty) * num(r.fxUnit), "提携先その他"])
   ];
-  for (const [row, fxSub, roundUpMan] of pRows){
-    let cost = fxCost(gFx, fxSub);
-    if (roundUpMan) cost = Math.ceil(cost / 10000) * 10000;
-    const r = finish(num(row.sell), cost, row.taxCat, tr);
-    r.fxSub = fxSub; r.lt = ltFlag(gFx); r.taxCatUsed = row.taxCat;
+  for (const [row, fxSub, catLab] of pRows){
+    const raw = fxCost(gFx, fxSub);
+    const cost = ceilMan(raw);
+    const sell = cost + num(row.markup);
+    const r = finish(sell, cost, row.taxCat, tr);
+    r.fxSub = fxSub; r.raw = raw; r.lt = ltFlag(gFx); r.taxCatUsed = row.taxCat;
     R[row.id] = r; track(r); trackLt(r.lt);
     acc(cat.partner, r);
+    D(catLab + ":" + (row.name || "(無名)"), r);
   }
 
   /* --- ゲストスピーカー / 企業訪問 --- */
   cat.guestPartner = zero(); cat.guestDirect = zero();
   for (const row of pd.guests){
     const fxSub = num(row.qty) * num(row.fxUnit);
-    const cost = fxCost(gFx, fxSub);
-    const r = finish(num(row.sell), cost, row.taxCat, tr);
-    r.fxSub = fxSub; r.lt = ltFlag(gFx); r.taxCatUsed = row.taxCat;
+    const raw = fxCost(gFx, fxSub);
+    const cost = ceilMan(raw);
+    const sell = cost + num(row.markup);
+    const r = finish(sell, cost, row.taxCat, tr);
+    r.fxSub = fxSub; r.raw = raw; r.lt = ltFlag(gFx); r.taxCatUsed = row.taxCat;
     R[row.id] = r;
     if (row.on){ track(r); trackLt(r.lt);
-      acc(row.payVia === "direct" ? cat.guestDirect : cat.guestPartner, r); }
+      acc(row.payVia === "direct" ? cat.guestDirect : cat.guestPartner, r);
+      D(row.type + "(" + (row.name || "無名") + ")", r); }
   }
 
   /* --- ミッション企業手配 --- */
@@ -299,7 +313,7 @@ function computeAll(pd){
   { const m = pd.ma;
     const r = finish(num(m.sell), num(m.cost), m.taxCat, tr);
     r.taxCatUsed = m.taxCat; R["ma"] = r; track(r);
-    if (m.on) acc(cat.ma, r);
+    if (m.on){ acc(cat.ma, r); D("ミッション企業手配", r); }
   }
 
   /* --- バディ --- */
@@ -307,7 +321,7 @@ function computeAll(pd){
   { const b = pd.buddy;
     const totalH = num(b.people) * num(b.daysPer) * num(b.hoursPerDay);
     const sellLocal = totalH * num(b.unit);
-    const costLocal = sellLocal;   // 原価 = 時間単価 × 総稼働時間(自動)
+    const costLocal = totalH * num(b.costUnit != null ? b.costUnit : b.unit);   // 原価 = 原価時間単価(手入力) × 総稼働時間
     const rL = finish(sellLocal, costLocal, b.taxCat, tr);
     Object.assign(rL, { totalH, taxCatUsed: b.taxCat });
     R["buddy-local"] = rL;
@@ -315,18 +329,21 @@ function computeAll(pd){
     const costMtg = sellMtg;   // 原価 = 単価 × 回数(自動)
     const rM = finish(sellMtg, costMtg, b.taxCat, tr);
     rM.taxCatUsed = b.taxCat; R["buddy-mtg"] = rM;
-    if (b.on){ track(rL); acc(cat.buddy, rL); acc(cat.buddy, rM); }
+    if (b.on){ track(rL); acc(cat.buddy, rL); acc(cat.buddy, rM);
+      D("バディ(現地稼働)", rL); if (rM.sell || rM.cost) D("バディ(オンラインMTG)", rM); }
   }
 
   /* --- ホテル --- */
   cat.hotel = zero();
   for (const row of pd.hotels){
     const fxSub = num(row.rooms) * num(row.nights) * num(row.fxUnit);
-    const cost = fxCost(gFx, fxSub);
-    const r = finish(num(row.sell), cost, row.taxCat, tr);
-    r.fxSub = fxSub; r.lt = ltFlag(gFx); r.taxCatUsed = row.taxCat;
+    const raw = fxCost(gFx, fxSub);
+    const cost = ceilMan(raw);
+    const r = finish(cost, cost, row.taxCat, tr);   // 売価 = 円換算原価
+    r.fxSub = fxSub; r.raw = raw; r.lt = ltFlag(gFx); r.taxCatUsed = row.taxCat;
     R[row.id] = r;
-    if (row.on){ track(r); trackLt(r.lt); acc(cat.hotel, r); }
+    if (row.on){ track(r); trackLt(r.lt); acc(cat.hotel, r);
+      D("ホテル(" + (row.name || "無名") + ")", r); }
   }
 
   /* --- 航空券 --- */
@@ -336,17 +353,18 @@ function computeAll(pd){
   { const sell = num(f.people) * num(f.unit);
     const r = finish(sell, num(f.cost), f.taxCat, tr);
     r.taxCatUsed = f.taxCat; R["flight"] = r;
-    if (fIncluded){ track(r); acc(cat.flight, r); }
+    if (fIncluded){ track(r); acc(cat.flight, r); D("航空券", r); }
   }
 
   /* --- アテンド --- */
   cat.al = zero(); cat.ad = zero();
-  for (const [key, rows] of [["al", pd.al], ["ad", pd.ad]]){
+  for (const [key, rows, lab] of [["al", pd.al, "現地アテンド"], ["ad", pd.ad, "国内アテンド"]]){
     for (const row of rows){
       const sell = num(row.days) * num(row.unit);
-      const r = finish(sell, num(row.cost), row.taxCat, tr);
+      const r = finish(sell, 0, row.taxCat, tr);   // 原価は管理しない
       r.taxCatUsed = row.taxCat; R[row.id] = r; track(r);
       acc(cat[key], r);
+      D(lab + (row.person ? "(" + row.person + ")" : ""), r);
     }
   }
 
@@ -364,6 +382,7 @@ function computeAll(pd){
   { const r = finish(mgmtSell, num(pd.mgmt.cost), pd.mgmt.taxCat, tr);
     r.base = mgmtBase; r.taxCatUsed = pd.mgmt.taxCat; R["mgmt"] = r; track(r);
     cat.mgmt = zero(); acc(cat.mgmt, r);
+    D("企画・管理費", r);
   }
 
   /* --- 合計 --- */
@@ -435,7 +454,7 @@ function computeAll(pd){
       ex: 0, tax: 0, inc: 0, note: FLIGHT_NOTE, excluded: true });
 
   return {
-    R, cat, freee,
+    R, cat, freee, detail,
     totals: { ex: total.sell, cost: total.cost, gp: total.gp, gpRate,
       tax: total.tax, inc: total.sell + total.tax,
       taxableEx: total.taxable, nonTaxEx: total.sell - total.taxable,
@@ -637,7 +656,6 @@ function secFx(){
       ${F("TTSレート", ninp("fx.tts", f.tts))}
       ${F("上乗せ率(%)", ninp("fx.markupPct", f.markupPct))}
       ${F("計算レート(自動)", comp(commonRate().toFixed(4), "big"))}
-      ${F("消費税率(%)", ninp("taxRate", S.taxRate))}
     </div>
     <a class="addrow" style="display:inline-block;text-decoration:none;margin-top:8px" target="_blank" rel="noopener"
        href="https://www.murc-kawasesouba.jp/fx/index.php">↗ 本日のTTSレートを確認(三菱UFJリサーチ&コンサルティング)</a>
@@ -738,14 +756,13 @@ function secConsult(C){
 }
 
 /* --- 5. 現地提携先費用 --- */
-/* 円換算原価セル: 「円単価 × 数量 = 合計」の式と万円を併記 */
+/* 円換算原価セル: 万円と「単価×数量」の内訳を併記 */
 function costFormulaCell(r, qty, qtyUnit){
   const q = num(qty);
-  if (q > 1){
-    const unitJpy = rnd(r.cost / q);
-    return td(`<div class="comp">${fmt(unitJpy)}円 × ${q}${qtyUnit} = <strong>${fmt(r.cost)}円</strong><div class="man">${man(r.cost)}</div></div>`);
-  }
-  return td(`<div class="comp">${fmt(r.cost)}円<div class="man">${man(r.cost)}</div></div>`);
+  let sub = man(r.cost);
+  if (q > 1) sub += ` | ${fmt(rnd(r.raw / q))}円×${q}${qtyUnit}=${fmt(r.raw)}円`;
+  else if (r.raw !== r.cost) sub += ` | 切上げ前 ${fmt(r.raw)}円`;
+  return td(`<div class="comp"><strong>${fmt(r.cost)}</strong>円<div class="man">${sub}</div></div>`);
 }
 
 function partnerTable(C, key, title, qtyCols, opts = {}){
@@ -759,13 +776,15 @@ function partnerTable(C, key, title, qtyCols, opts = {}){
         ? td(ninp(bp+".fxTotal",row.fxTotal))
         : td(ninp(bp+".fxUnit",row.fxUnit)) + td(comp(r.fxSub.toLocaleString("ja-JP",{maximumFractionDigits:2})))}
       ${costFormulaCell(r, qty, opts.qtyUnit || "")}
-      ${td(ninp(bp+".sell",row.sell))}${showGp ? gpTds(r) : ""}
+      ${td(ninp(bp+".markup",row.markup,"w-s"))}
+      ${td(comp(fmt(r.sell)+"円"))}
+      ${showGp ? td(comp(pct(r.gpRate), gpCls(r.gpRate))) : ""}
       ${td(taxSel(bp+".taxCat",row.taxCat))}${td(inp(bp+".note",row.note,"w-m"))}
       ${td(delBtn("partner."+key,row.id))}</tr>`; }).join("");
   return `<h3>${title}${opts.note ? ` <span class="man">${opts.note}</span>` : ""}</h3><div class="tw"><table class="tbl">
     <tr><th>詳細名</th>${qtyCols.map(([,lab])=>`<th>${lab}</th>`).join("")}
     ${opts.totalInput ? `<th>外貨合計(${esc(S.fx.currency)})</th>` : `<th>外貨単価(${esc(S.fx.currency)})</th><th>外貨小計</th>`}
-    <th>円換算原価(自動)</th><th>売価(円)</th>${showGp ? "<th>粗利</th><th>粗利率</th>" : ""}<th>課税区分</th><th>備考</th><th></th></tr>
+    <th>円換算原価(自動・万切上げ)</th><th>上乗せ額(円)=粗利</th><th>売価(自動)</th>${showGp ? "<th>粗利率</th>" : ""}<th>課税区分</th><th>備考</th><th></th></tr>
     ${body}</table></div>${addBtn("partner."+key,"行を追加")}`;
 }
 function secPartner(C){
@@ -781,14 +800,13 @@ function secPartner(C){
       ${F("提携先費用 小計(税別売価)", comp(fmt(c.sell + cg.sell)+"円","big"))}
       ${F("うちゲスト/企業訪問(提携先経由)", comp(fmt(cg.sell)+"円"))}
     </div>
-    <p class="hint">円換算は共通設定を自動使用:計算レート <strong>${commonRate().toFixed(4)}</strong> / 現地税 <strong>${esc(S.fx.ltType)} ${num(S.fx.ltRate)}%(${S.fx.ltMode==="incl"?"税込":S.fx.ltMode==="excl"?"税別・原価に加算":"未確認"})</strong>(変更は「為替・計算レート」で)。freee転記では「現地提携先プログラム費」に合算されます。</p>
+    <p class="hint">円換算は共通設定を自動使用:計算レート <strong>${commonRate().toFixed(4)}</strong> / 現地税 <strong>${esc(S.fx.ltType)} ${num(S.fx.ltRate)}%(${S.fx.ltMode==="incl"?"税込":S.fx.ltMode==="excl"?"税別・原価に加算":"未確認"})</strong>。円換算原価は万円単位に切り上げ、<strong>売価 = 円換算原価 + 上乗せ額</strong>(上乗せ額がそのまま粗利)。freee転記では「現地提携先プログラム費」に合算されます。</p>
     ${partnerTable(C,"program","5-1. プログラム費用・会場費",[["qty","数量"],["desc","内容/単位"]],
         { qtyOf: r => num(r.qty), qtyUnit: "" })}
     ${partnerTable(C,"party","5-2. 懇親会",[["people","対象人数(参考)"]],
         { totalInput: true, note: "原価は外貨の合計額で入力" })}
     ${partnerTable(C,"transport","5-3. 交通費・空港送迎",[["desc","内容"],["times","回数"],["vehicles","台数"]],
-        { showGp: false, qtyOf: r => num(r.times) * num(r.vehicles), qtyUnit: "回×台",
-          note: "円換算原価は万円単位に切り上げ" })}
+        { showGp: false, qtyOf: r => num(r.times) * num(r.vehicles), qtyUnit: "回×台" })}
     ${partnerTable(C,"other","5-4. その他現地提携先費用",[["qty","数量"],["desc","内容"]],
         { qtyOf: r => num(r.qty), qtyUnit: "" })}
   </div></section>`;
@@ -808,7 +826,9 @@ function secGuest(C){
       ${td(ninp(bp+".qty",row.qty,"w-s"))}${td(ninp(bp+".fxUnit",row.fxUnit))}
       ${td(comp(r.fxSub.toLocaleString("ja-JP",{maximumFractionDigits:2})))}
       ${costFormulaCell(r, row.qty, "")}
-      ${td(ninp(bp+".sell",row.sell))}${gpTds(r)}
+      ${td(ninp(bp+".markup",row.markup,"w-s"))}
+      ${td(comp(fmt(r.sell)+"円"))}
+      ${td(comp(pct(r.gpRate), gpCls(r.gpRate)))}
       ${td(taxSel(bp+".taxCat",row.taxCat))}${td(inp(bp+".note",row.note,"w-m"))}
       ${td(delBtn("guests",row.id))}</tr>`; }).join("");
   return `<section class="card" id="sec-guest">${secH(6,"ゲストスピーカー / 企業訪問")}
@@ -817,7 +837,7 @@ function secGuest(C){
     <div class="tw"><table class="tbl">
       <tr><th></th><th>種別</th><th>会社/登壇者/訪問先</th><th>内容</th><th>実施日</th><th>稼働時間</th><th>稼働日数</th>
       <th>支払先区分</th><th>数量</th><th>外貨単価(${esc(S.fx.currency)})</th><th>外貨小計</th>
-      <th>円換算原価(自動)</th><th>売価(円)</th><th>粗利</th><th>粗利率</th><th>課税区分</th><th>備考</th><th></th></tr>
+      <th>円換算原価(自動・万切上げ)</th><th>上乗せ額(円)=粗利</th><th>売価(自動)</th><th>粗利率</th><th>課税区分</th><th>備考</th><th></th></tr>
       ${body}
     </table></div>${addBtn("guests","ゲスト/訪問先を追加")}
   </div></section>`;
@@ -852,9 +872,10 @@ function secBuddy(C){
       ${F("1人あたり稼働日数", ninp("pat.buddy.daysPer", b.daysPer))}
       ${F("1日あたり稼働時間", ninp("pat.buddy.hoursPerDay", b.hoursPerDay))}
       ${F("総稼働時間(自動)", comp(rL.totalH+" 時間"))}
-      ${F("時間単価(円)", ninp("pat.buddy.unit", b.unit))}
+      ${F("時間単価(円・請求側)", ninp("pat.buddy.unit", b.unit))}
       ${F("売価(自動)", comp(fmt(rL.sell)+"円","big"))}
-      ${F("原価(自動:時間単価×総稼働時間)", comp(fmt(rL.cost)+"円"))}
+      ${F("原価 時間単価(円・手入力)", ninp("pat.buddy.costUnit", b.costUnit))}
+      ${F("原価(自動:原価単価×総稼働時間)", comp(fmt(rL.cost)+"円"))}
       ${F("粗利", comp(fmt(rL.gp)+"円", gpCls(rL.gpRate)))}
       ${F("粗利率", comp(pct(rL.gpRate), gpCls(rL.gpRate)))}
     </div>
@@ -881,8 +902,7 @@ function secHotel(C){
       ${td(ninp(bp+".people",row.people,"w-s"))}${td(ninp(bp+".nights",row.nights,"w-s"))}${td(ninp(bp+".rooms",row.rooms,"w-s"))}
       ${td(ninp(bp+".fxUnit",row.fxUnit))}
       ${td(comp(r.fxSub.toLocaleString("ja-JP",{maximumFractionDigits:2})))}
-      ${td(`<div class="comp">${fmt(r.cost)}円<div class="man">${man(r.cost)}</div></div>`)}
-      ${td(ninp(bp+".sell",row.sell))}${gpTds(r)}
+      ${td(`<div class="comp"><strong>${fmt(r.cost)}</strong>円<div class="man">${man(r.cost)}${r.raw !== r.cost ? " | 切上げ前 " + fmt(r.raw) + "円" : ""}</div></div>`)}
       ${td(sel(bp+".breakfast",row.breakfast,["込み","別","不明"],"w-s"))}
       ${td(sel(bp+".taxSvc",row.taxSvc,["込み","別","不明"],"w-s"))}
       ${td(inp(bp+".cancel",row.cancel,"w-m","キャンセル条件"))}
@@ -894,7 +914,7 @@ function secHotel(C){
     <div class="tw"><table class="tbl">
       <tr><th></th><th>ホテル名/都市</th><th>部屋タイプ</th><th>宿泊対象人数</th><th>宿泊数</th><th>部屋数</th>
       <th>1泊1室 外貨単価(${esc(S.fx.currency)})</th><th>外貨小計</th>
-      <th>円換算原価(自動)</th><th>売価(円)</th><th>粗利</th><th>粗利率</th><th>朝食</th><th>税サ</th><th>キャンセル条件</th><th>課税区分</th><th>備考</th><th></th></tr>
+      <th>円換算原価=売価(自動・万切上げ)</th><th>朝食</th><th>税サ</th><th>キャンセル条件</th><th>課税区分</th><th>備考</th><th></th></tr>
       ${body}
     </table></div>${addBtn("hotels","ホテルを追加")}
   </div></section>`;
@@ -926,11 +946,11 @@ function attendTable(C, key, title){
   const body = rows.map((row,i) => { const bp = `pat.${key}.${i}`, r = C.R[row.id];
     return `<tr>${td(inp(bp+".person",row.person,"w-l","担当者名"))}
       ${td(ninp(bp+".days",row.days,"w-s"))}${td(ninp(bp+".unit",row.unit))}
-      ${td(comp(fmt(r.sell)))}${td(ninp(bp+".cost",row.cost))}
-      ${gpTds(r)}${td(taxSel(bp+".taxCat",row.taxCat))}${td(inp(bp+".note",row.note,"w-m"))}
+      ${td(comp(fmt(r.sell)+"円"))}
+      ${td(taxSel(bp+".taxCat",row.taxCat))}${td(inp(bp+".note",row.note,"w-m"))}
       ${td(delBtn(key,row.id))}</tr>`; }).join("");
   return `<h3>${title}</h3><div class="tw"><table class="tbl">
-    <tr><th>担当者名</th><th>稼働日数</th><th>1日あたり単価</th><th>売価(自動)</th><th>原価</th><th>粗利</th><th>粗利率</th><th>課税区分</th><th>備考</th><th></th></tr>
+    <tr><th>担当者名</th><th>稼働日数</th><th>1日あたり単価</th><th>売価(自動)</th><th>課税区分</th><th>備考</th><th></th></tr>
     ${body}</table></div>${addBtn(key,"担当者を追加")}`;
 }
 function secAttend(C){
@@ -968,23 +988,10 @@ function secMgmt(C){
 /* --- 13. 課税・粗利サマリー --- */
 function secTax(C){
   const t = C.totals;
-  const catRows = [
-    ["事前研修・オリエンテーション", C.cat.pre],
-    ["コンサルティング", C.cat.consult],
-    ["現地提携先費用", C.cat.partner],
-    ["ゲスト/企業訪問(提携先経由)", C.cat.guestPartner],
-    ["ゲスト/企業訪問(直接支払い)", C.cat.guestDirect],
-    ["ミッション企業手配", C.cat.ma],
-    ["バディ手配", C.cat.buddy],
-    ["ホテル", C.cat.hotel],
-    ["航空券(見積に含む場合)", C.cat.flight],
-    ["現地アテンド", C.cat.al],
-    ["国内アテンド", C.cat.ad],
-    ["企画・管理費", C.cat.mgmt]
-  ].map(([lab,c]) => { const gr = c.sell ? c.gp/c.sell : NaN;
-    return `<tr><td>${lab}</td><td class="r">${fmt(c.sell)}</td><td class="r">${fmt(c.cost)}</td>
-      <td class="r ${gpCls(gr)}">${fmt(c.gp)}</td><td class="r ${gpCls(gr)}">${pct(gr)}</td>
-      <td class="r">${fmt(c.tax)}</td></tr>`; }).join("");
+  const dRows = C.detail.map(({label, r}) =>
+    `<tr><td>${esc(label)}</td><td class="r">${fmt(r.sell)}</td><td class="r">${fmt(r.cost)}</td>
+      <td class="r ${gpCls(r.gpRate)}">${fmt(r.gp)}</td><td class="r ${gpCls(r.gpRate)}">${pct(r.gpRate)}</td>
+      <td class="r">${fmt(r.tax)}</td></tr>`).join("");
   const warns = [];
   if (C.warn.taxUnknown) warns.push(`課税区分が「未確認」の項目が ${C.warn.taxUnknown} 件あります。`);
   if (C.warn.ltUnknown) warns.push(`現地税(GST/VAT)が「未確認」の項目が ${C.warn.ltUnknown} 件あります。税込/税別を提携先に確認してください。`);
@@ -1002,8 +1009,8 @@ function secTax(C){
     </div>
     <p class="hint">粗利率の目安:20%未満は黄色、10%未満は赤で表示されます。</p>
     <div class="tw"><table class="tbl sumtbl">
-      <tr><th>カテゴリ</th><th>売価(税別)</th><th>原価</th><th>粗利</th><th>粗利率</th><th>消費税</th></tr>
-      ${catRows}
+      <tr><th>項目(内訳)</th><th>売価(税別)</th><th>原価</th><th>粗利</th><th>粗利率</th><th>消費税</th></tr>
+      ${dRows}
       <tfoot><tr><td>合計</td><td class="r">${fmt(t.ex)}</td><td class="r">${fmt(t.cost)}</td>
       <td class="r">${fmt(t.gp)}</td><td class="r">${pct(t.gpRate)}</td><td class="r">${fmt(t.tax)}</td></tr></tfoot>
     </table></div>
@@ -1107,12 +1114,12 @@ function render(){
 const ROW_TPL = {
   "preRows": () => ({ id:uid(), name:"", lecturer:"", times:"1", hours:"1", days:"1", sell:"", gpIn:"0", taxCat:"課税", note:"" }),
   "cm": () => ({ id:uid(), company:"", preCnt:"1", localCnt:"2", postCnt:"0", hoursPer:"1", unit:"50000", costRate:"50", taxCat:"課税", note:"" }),
-  "partner.program": () => Object.assign({ id:uid(), name:"", desc:"", qty:"1", fxUnit:"", sell:"", taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
-  "partner.party": () => Object.assign({ id:uid(), name:"", people:String(stayCount()), fxTotal:"", sell:"", taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
-  "partner.transport": () => Object.assign({ id:uid(), name:"", desc:"", times:"1", vehicles:"1", fxUnit:"", sell:"", taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
-  "partner.other": () => Object.assign({ id:uid(), name:"", desc:"", qty:"1", fxUnit:"", sell:"", taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
+  "partner.program": () => Object.assign({ id:uid(), name:"", desc:"", qty:"1", fxUnit:"", markup:"0", taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
+  "partner.party": () => Object.assign({ id:uid(), name:"", people:String(stayCount()), fxTotal:"", markup:"0", taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
+  "partner.transport": () => Object.assign({ id:uid(), name:"", desc:"", times:"1", vehicles:"1", fxUnit:"", markup:"0", taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
+  "partner.other": () => Object.assign({ id:uid(), name:"", desc:"", qty:"1", fxUnit:"", markup:"0", taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
   "guests": () => Object.assign({ id:uid(), on:true, type:"ゲストスピーカー", name:"", content:"", date:"", hours:"1", days:"1",
-      payVia:"partner", qty:"1", fxUnit:"", sell:"", taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
+      payVia:"partner", qty:"1", fxUnit:"", markup:"0", taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
   "hotels": () => Object.assign({ id:uid(), on:true, name:"", city:"", roomType:"", people:String(stayCount()), nights:"", rooms:String(stayCount()),
       fxUnit:"", sell:"", breakfast:"不明", taxSvc:"不明", cancel:"", taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
   "al": () => ({ id:uid(), person:"", days:"", unit:"", cost:"", taxCat:"課税", note:"" }),
