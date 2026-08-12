@@ -29,8 +29,9 @@ const fxBlock = (cur, over={}) => Object.assign({
 function defaultPatternData(){
   return {
     basic: { country:"シンガポール", city:"シンガポール", startDate:"", endDate:"",
-      participants:"16", geStaff:"1", clientStaff:"1",
-      lecturers:"0", lecturerStay:false, lecturerFlight:false, groups:"4" },
+      participants:"16", geStaff:"1", clientStaff:"1", lecturers:"0", groups:"4",
+      stayInc:   { p:true, ge:true, cl:true, lec:false },
+      flightInc: { p:true, ge:true, cl:true, lec:false } },
     pre: {
       kickoff: { on:true, sell:"350000", cost:"0", taxCat:"課税", note:"" },
       orient:  { on:true, sell:"300000", cost:"0", taxCat:"課税", note:"" },
@@ -84,6 +85,27 @@ function defaultPatternData(){
   };
 }
 
+/* 新規案件用: 構造は同じ・案件固有の値は空。単価の社内標準(コンサル単価等)と率は残す。 */
+function blankPatternData(){
+  const d = defaultPatternData();
+  const b = d.basic;
+  b.country = ""; b.city = ""; b.participants = ""; b.geStaff = ""; b.clientStaff = ""; b.lecturers = ""; b.groups = "";
+  d.partner.name = ""; d.partner.country = ""; d.partner.city = ""; d.partner.note = "";
+  for (const k of ["program","party","transport","other"])
+    for (const r of d.partner[k]){ r.fxUnit = ""; if (r.fxTotal != null) r.fxTotal = ""; r.markup = "0"; r.note = ""; }
+  for (const h of d.hotels){ h.name = ""; h.city = ""; h.roomType = ""; h.fxUnit = ""; h.rooms = ""; h.note = ""; }
+  d.cg.name = ""; d.cg.targetGroups = ""; d.cg.note = "";
+  for (const r of d.cm){ r.company = ""; r.note = ""; }
+  for (const r of d.pre.rows){ r.name = ""; r.lecturer = ""; r.sell = ""; r.gpIn = "0"; r.matUnit = "0"; r.note = ""; }
+  d.pre.kickoff.cost = "0"; d.pre.orient.cost = "0";
+  d.ma.company = ""; d.ma.agency = ""; d.ma.person = ""; d.ma.cost = ""; d.ma.note = "";
+  d.buddy.people = ""; d.buddy.daysPer = ""; d.buddy.hoursPerDay = ""; d.buddy.mtgCnt = ""; d.buddy.mtgCost = ""; d.buddy.note = "";
+  d.flight.unit = ""; d.flight.note = "";
+  for (const r of d.al){ r.days = ""; r.unit = ""; r.note = ""; }
+  for (const r of d.ad){ r.days = ""; r.unit = ""; r.note = ""; }
+  d.guests = [];
+  return d;
+}
 function defaultState(){
   const pid = uid();
   return {
@@ -100,10 +122,16 @@ const LSKEY = "getc-training-calc-v2";
 const LSKEY_V1 = "getc-training-calc-v1";
 let ROOT;   // { cases:[case,…], activeId }
 let S;      // 表示中の案件(case) = { id, updatedAt, basic, fx, taxRate, patterns, active }
-function newCase(projectName){
+function newCase(projectName, blank){
   const c = defaultState();
   c.id = uid(); c.updatedAt = Date.now();
   if (projectName != null) c.basic.project = projectName;
+  if (blank){
+    c.basic.client = ""; c.basic.note = "";
+    const p = c.patterns[0];
+    p.name = "パターン1"; p.comment = "";
+    p.data = blankPatternData();
+  }
   return c;
 }
 function setActiveCase(id){
@@ -145,13 +173,19 @@ function migrate(){
     if (c.basic.lecturers == null && c.basic.participants != null){
       c.basic.lecturers = "0"; c.basic.lecturerStay = false; c.basic.lecturerFlight = false; }
     for (const p of c.patterns){
+      if (p.data.basic && p.data.basic.stayInc == null){
+        const ob = p.data.basic;
+        ob.stayInc =   { p:true, ge:true, cl:true, lec: !!ob.lecturerStay };
+        ob.flightInc = { p:true, ge:true, cl:true, lec: !!ob.lecturerFlight };
+      }
       if (p.data.basic == null){
         const b = c.basic;
         p.data.basic = { country: b.country || "", city: b.city || "",
           startDate: b.startDate || "", endDate: b.endDate || "",
           participants: b.participants ?? "16", geStaff: b.geStaff ?? "1", clientStaff: b.clientStaff ?? "1",
-          lecturers: b.lecturers ?? "0", lecturerStay: !!b.lecturerStay, lecturerFlight: !!b.lecturerFlight,
-          groups: b.groups ?? "4" };
+          lecturers: b.lecturers ?? "0", groups: b.groups ?? "4",
+          stayInc:   { p:true, ge:true, cl:true, lec: !!b.lecturerStay },
+          flightInc: { p:true, ge:true, cl:true, lec: !!b.lecturerFlight } };
       }
     }
     if (c.fx.ltType == null){ c.fx.ltType = "GST"; c.fx.ltMode = "incl"; c.fx.ltRate = "9"; }
@@ -213,10 +247,12 @@ function tripWeeksFor(pb){
   const n = tripNightsFor(pb);
   return n != null ? Math.ceil((n + 1) / 7) : null;
 }
-function stayCountFor(pb){
-  return num(pb.participants) + num(pb.geStaff) + num(pb.clientStaff)
-       + (pb.lecturerStay ? num(pb.lecturers) : 0);
+function headCount(pb, inc){
+  inc = inc || { p:true, ge:true, cl:true, lec:false };
+  return (inc.p ? num(pb.participants) : 0) + (inc.ge ? num(pb.geStaff) : 0)
+       + (inc.cl ? num(pb.clientStaff) : 0) + (inc.lec ? num(pb.lecturers) : 0);
 }
+function stayCountFor(pb){ return headCount(pb, pb.stayInc); }
 /* 表示中パターン用のショートハンド */
 function tripNights(){ return tripNightsFor(patBasic()); }
 function tripWeeks(){ return tripWeeksFor(patBasic()); }
@@ -330,9 +366,10 @@ function computeAll(pd){
   /* --- ゲストスピーカー / 企業訪問 --- */
   cat.guestPartner = zero(); cat.guestDirect = zero();
   for (const row of pd.guests){
-    const fxSub = num(row.qty) * num(row.fxUnit);
-    const raw = fxCost(gFx, fxSub);
-    const cost = ceilMan(raw);
+    const isJpy = row.rateMode === "jpy";
+    const fxSub = isJpy ? 0 : num(row.qty) * num(row.fxUnit);
+    const raw = isJpy ? rnd(num(row.jpyCost)) : fxCost(gFx, fxSub);
+    const cost = isJpy ? raw : ceilMan(raw);   // 円建ては入力額のまま、外貨は万円切上げ
     const sell = cost + num(row.markup);
     const r = finish(sell, cost, row.taxCat, tr);
     r.fxSub = fxSub; r.raw = raw; r.lt = ltFlag(gFx); r.taxCatUsed = row.taxCat;
@@ -405,8 +442,7 @@ function computeAll(pd){
   cat.flight = zero();
   const f = pd.flight;
   const fDirect = (f.arrange === "貴社直接手配" || f.arrange === "旅行会社から貴社へ直接請求");
-  const fPeople = num(pb.participants) + num(pb.geStaff) + num(pb.clientStaff)
-    + (pb.lecturerFlight ? num(pb.lecturers) : 0);
+  const fPeople = headCount(pb, pb.flightInc);
   { const sell = fPeople * num(f.unit);   // 単価が空欄なら0円=実質含まれない
     const r = finish(sell, sell, f.taxCat, tr);   // 原価・粗利は扱わない(粗利0)
     r.people = fPeople;
@@ -742,7 +778,8 @@ function secBasic(){
     ${F("GE事務局人数", ninp("pat.basic.geStaff", pb.geStaff))}
     ${F("先方事務局人数", ninp("pat.basic.clientStaff", pb.clientStaff))}
     ${F("講師の人数", ninp("pat.basic.lecturers", pb.lecturers))}
-    ${F("講師分の加算", chk("pat.basic.lecturerStay", pb.lecturerStay, "宿泊に加算") + " " + chk("pat.basic.lecturerFlight", pb.lecturerFlight, "航空券に加算"))}
+    ${F("宿泊人数に含める", chk("pat.basic.stayInc.p", pb.stayInc.p, "参加者") + " " + chk("pat.basic.stayInc.ge", pb.stayInc.ge, "GE事務局") + " " + chk("pat.basic.stayInc.cl", pb.stayInc.cl, "先方事務局") + " " + chk("pat.basic.stayInc.lec", pb.stayInc.lec, "講師"))}
+    ${F("航空券人数に含める", chk("pat.basic.flightInc.p", pb.flightInc.p, "参加者") + " " + chk("pat.basic.flightInc.ge", pb.flightInc.ge, "GE事務局") + " " + chk("pat.basic.flightInc.cl", pb.flightInc.cl, "先方事務局") + " " + chk("pat.basic.flightInc.lec", pb.flightInc.lec, "講師"))}
     ${F("宿泊数(日程から自動)", comp(tripNights() != null ? tripNights() + "泊" + (tripNights()+1) + "日" : "日程を入力してください"))}
     ${F("週数(日程から自動)", comp(tripWeeks() != null ? tripWeeks() + "週間" : "—"))}
     ${F("合計宿泊人数(自動)", comp(fmt(stayCount())+" 名"))}
@@ -931,9 +968,11 @@ function secGuest(C){
       ${td(dinp(bp+".date",row.date))}
       ${td(ninp(bp+".hours",row.hours,"w-s"))}${td(ninp(bp+".days",row.days,"w-s"))}
       ${td(sel(bp+".payVia",row.payVia,[["partner","現地提携先経由"],["direct","直接支払い"]],"w-m"))}
-      ${td(ninp(bp+".qty",row.qty,"w-s"))}${td(ninp(bp+".fxUnit",row.fxUnit))}
-      ${td(comp(r.fxSub.toLocaleString("ja-JP",{maximumFractionDigits:2})))}
-      ${costFormulaCell(r, row.qty, "")}
+      ${td(sel(bp+".rateMode",row.rateMode,[["common","外貨(共通レート)"],["jpy","円建て"]],"w-m"))}
+      ${row.rateMode === "jpy"
+        ? td(ninp(bp+".jpyCost",row.jpyCost)) + td("") + td("")
+        : td(ninp(bp+".qty",row.qty,"w-s")) + td(ninp(bp+".fxUnit",row.fxUnit)) + td(comp(r.fxSub.toLocaleString("ja-JP",{maximumFractionDigits:2})))}
+      ${costFormulaCell(r, row.rateMode === "jpy" ? 1 : row.qty, "")}
       ${td(ninp(bp+".markup",row.markup,"w-s"))}
       ${td(comp(fmt(r.sell)+"円"))}
       ${td(comp(pct(r.gpRate), gpCls(r.gpRate)))}
@@ -941,11 +980,11 @@ function secGuest(C){
       ${td(delBtn("guests",row.id))}</tr>`; }).join("");
   return `<section class="card" id="sec-guest">${secH(6,"ゲストスピーカー / 企業訪問")}
   <div class="body">
-    <p class="hint">円換算は「為替・計算レート」の共通設定(計算レート・現地税)を自動使用します。支払先区分が「現地提携先経由」の行はfreee転記で現地提携先費用に合算、「直接支払い」の行は独立明細になります。</p>
+    <p class="hint">行ごとに「外貨(共通レートで円換算・万円切上げ)」か「円建て(円で直接入力)」を選べます。どちらも売価 = 原価 + 上乗せ額(上乗せ額がそのまま粗利)。「現地提携先経由」の行はfreee転記で現地提携先費用に合算、「直接支払い」は独立明細です。</p>
     <div class="tw"><table class="tbl">
       <tr><th></th><th>種別</th><th>会社/登壇者/訪問先</th><th>内容</th><th>実施日</th><th>稼働時間</th><th>稼働日数</th>
-      <th>支払先区分</th><th>数量</th><th>外貨単価(${esc(S.fx.currency)})</th><th>外貨小計</th>
-      <th>円換算原価(自動・万切上げ)</th><th>上乗せ額(円)=粗利</th><th>売価(自動)</th><th>粗利率</th><th>課税区分</th><th>備考</th><th></th></tr>
+      <th>支払先区分</th><th>建て</th><th>数量/円建て原価</th><th>外貨単価(${esc(S.fx.currency)})</th><th>外貨小計</th>
+      <th>円換算原価(自動)</th><th>上乗せ額(円)=粗利</th><th>売価(自動)</th><th>粗利率</th><th>課税区分</th><th>備考</th><th></th></tr>
       ${body}
     </table></div>${addBtn("guests","ゲスト/訪問先を追加")}
   </div></section>`;
@@ -1037,7 +1076,7 @@ function secFlight(C){
   <div class="body"><div class="grid">
     ${F("手配区分", sel("pat.flight.arrange", f.arrange,
         ["GE見積に含める","貴社直接手配","旅行会社から貴社へ直接請求","未定"]))}
-    ${F("対象人数(自動:参加者+事務局" + (S.basic.lecturerFlight ? "+講師" : "") + ")", comp(fmt(r.people)+" 名"))}
+    ${F("対象人数(自動:基本情報「航空券人数に含める」の設定)", comp(fmt(r.people)+" 名"))}
     ${F("1人あたり単価(円)", ninp("pat.flight.unit", f.unit))}
     ${F("合計金額(自動)", comp(fmt(r.sell)+"円","big"))}
     ${F("課税区分", taxSel("pat.flight.taxCat", f.taxCat))}
@@ -1248,6 +1287,7 @@ function render(){
   renderSumbar(C);
   document.getElementById("main").innerHTML =
     `<datalist id="curlist">${CURRENCIES.map(c=>`<option value="${c}">`).join("")}</datalist>` +
+    `<div id="legend"><span><span class="sw-in"></span>白い枠 = 入力欄</span><span><span class="sw-auto"></span>グレー = 自動計算</span><span>◆ = 小計</span><span>金額は明細ごとに円未満四捨五入</span></div>` +
     secBasic() + secFx() + secPre(C) + secConsult(C) + secPartner(C) + secGuest(C) +
     secMa(C) + secBuddy(C) + secHotel(C) + secFlight(C) + secAttend(C) + secMgmt(C) +
     secOthers(C) + secTax(C) + secFreee(C) + secCompare();
@@ -1375,9 +1415,9 @@ document.addEventListener("click", e => {
   }
 
   else if (act === "newCase"){
-    const name = prompt("新しい案件名を入力してください", "新規案件");
+    const name = prompt("新しい案件名を入力してください\n(まっさらな状態で作成されます。単価の社内標準と税率だけ初期設定済み)", "新規案件");
     if (name === null) return;
-    const c = newCase(name); c.basic.client = "";
+    const c = newCase(name, true);
     ROOT.cases.push(c); setActiveCase(c.id); render(); window.scrollTo({top:0});
   }
 
