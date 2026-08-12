@@ -66,10 +66,8 @@ function defaultPatternData(){
     buddy: { on:true, agency:"CURIO Japan", people:"4", daysPer:"5", hoursPerDay:"6", unit:"10000",
              costUnit:"10000", mtgCnt:"1", mtgUnit:"10000", mtgCost:"", taxCat:"課税", note:"" },
     hotels: [
-      Object.assign({ id:uid(), on:true, name:"Hotel Chancellor", city:"シンガポール", roomType:"シングル",
-        people:"18", nights:"6", rooms:"18", fxUnit:"230",
-        sell:"", breakfast:"込み", taxSvc:"込み", cancel:"", taxCat:"不課税", note:"" },
-        fxBlock("SGD",{ltRate:"9"}))
+      Object.assign({ id:uid(), on:true, name:"参加者・事務局", people:"18", fxUnit:"",
+        jpyCost:"", taxCat:"不課税", note:"" }, fxBlock("SGD",{ltRate:"9"}))
     ],
     flight: { arrange:"GE見積に含める", people:"16", unit:"", cost:"", taxCat:"課税", note:"" },
     others: [
@@ -93,7 +91,7 @@ function blankPatternData(){
   d.partner.name = ""; d.partner.country = ""; d.partner.city = ""; d.partner.note = "";
   for (const k of ["program","party","transport","other"])
     for (const r of d.partner[k]){ r.fxUnit = ""; if (r.fxTotal != null) r.fxTotal = ""; r.markup = "0"; r.note = ""; }
-  for (const h of d.hotels){ h.name = ""; h.city = ""; h.roomType = ""; h.fxUnit = ""; h.rooms = ""; h.note = ""; }
+  for (const h of d.hotels){ h.name = ""; h.fxUnit = ""; h.jpyCost = ""; h.people = ""; h.note = ""; }
   d.cg.name = ""; d.cg.targetGroups = ""; d.cg.note = "";
   for (const r of d.cm){ r.company = ""; r.note = ""; }
   for (const r of d.pre.rows){ r.name = ""; r.lecturer = ""; r.sell = ""; r.gpIn = "0"; r.matUnit = "0"; r.note = ""; }
@@ -203,6 +201,19 @@ function migrate(){
         { id: uid(), name:"外国籍ビザ申請費用", sell:"300000", cost:"0", taxCat:"課税",
           note:"実費費用(翻訳費用など)が請求費用を上回った場合には追加でご請求をいたします。" } ];
       if (p.data.mgmt.targets.others == null) p.data.mgmt.targets.others = false;
+      for (const h of p.data.hotels){
+        if (h.perPerson) continue;
+        h.perPerson = true;
+        if (h.rooms != null || h.nights != null){
+          const legacy = [h.roomType, h.fxUnit && ("1泊 " + h.fxUnit + " " + (h.currency||"")),
+            h.rooms && (h.rooms + "室"), h.breakfast && ("朝食" + h.breakfast)].filter(Boolean).join(" / ");
+          if (legacy) h.note = (h.note ? h.note + " | " : "") + "旧データ:" + legacy;
+          h.fxUnit = "";   // 旧単価(1泊あたり)は新方式(1人あたり)と意味が違うためクリア
+        }
+        if (h.rateMode !== "jpy") h.rateMode = "common";
+        if (h.jpyCost == null) h.jpyCost = "";
+        if (h.people == null) h.people = "";
+      }
     }
   }
 }
@@ -258,13 +269,21 @@ function tripNights(){ return tripNightsFor(patBasic()); }
 function tripWeeks(){ return tripWeeksFor(patBasic()); }
 function stayCount(){ return stayCountFor(patBasic()); }
 
-/* 外貨行 → 円換算原価。現地税(税別)は外貨小計に加算してから換算。 */
-function fxCost(row, fxSub){
-  if (row.rateMode === "jpy") return rnd(num(row.jpyCost));
+/* 外貨 → 円換算。現地税(税別)は外貨小計に加算してから換算。 */
+function fxConvert(row, fxSub, rate){
   let sub = fxSub;
   if (row.ltMode === "excl" && row.ltType !== "なし") sub *= (1 + num(row.ltRate)/100);
-  const rate = row.rateMode === "custom" ? num(row.customRate) : commonRate();
   return rnd(sub * rate);
+}
+/* 売価側: 計算レート(TTS×上乗せ率)で換算 */
+function fxCost(row, fxSub){
+  if (row.rateMode === "jpy") return rnd(num(row.jpyCost));
+  const rate = row.rateMode === "custom" ? num(row.customRate) : commonRate();
+  return fxConvert(row, fxSub, rate);
+}
+/* 原価側: TTS素レートで換算(為替上乗せ分は粗利に含める) */
+function fxCostTTS(row, fxSub){
+  return fxConvert(row, fxSub, num(S.fx.tts));
 }
 function ltFlag(row){
   if (row.rateMode === "jpy" || row.ltType === "なし") return "";
@@ -354,9 +373,11 @@ function computeAll(pd){
   ];
   for (const [row, fxSub, catLab] of pRows){
     const raw = fxCost(gFx, fxSub);
-    const cost = ceilMan(raw);
-    const sell = cost + num(row.markup);
-    const r = finish(sell, cost, row.taxCat, tr);
+    const price = ceilMan(raw);                    // 計算レート換算・万切上げ = 売価のベース
+    const cost = fxCostTTS(gFx, fxSub);            // 原価はTTS素レートで計上
+    const sell = price + num(row.markup);
+    const r = finish(sell, cost, row.taxCat, tr);  // 粗利 = 上乗せ額 + 為替上乗せ分 + 切上げ差額
+    r.price = price;
     r.fxSub = fxSub; r.raw = raw; r.lt = ltFlag(gFx); r.taxCatUsed = row.taxCat;
     R[row.id] = r; track(r); trackLt(r.lt);
     acc(cat.partner, r);
@@ -369,10 +390,12 @@ function computeAll(pd){
     const isJpy = row.rateMode === "jpy";
     const fxSub = isJpy ? 0 : num(row.qty) * num(row.fxUnit);
     const raw = isJpy ? rnd(num(row.jpyCost)) : fxCost(gFx, fxSub);
-    const cost = isJpy ? raw : ceilMan(raw);   // 円建ては入力額のまま、外貨は万円切上げ
-    const sell = cost + num(row.markup);
+    const price = isJpy ? raw : ceilMan(raw);              // 円建ては入力額のまま、外貨は万円切上げ
+    const cost = isJpy ? price : fxCostTTS(gFx, fxSub);    // 外貨の原価はTTS素レート
+    const sell = price + num(row.markup);
     const r = finish(sell, cost, row.taxCat, tr);
-    r.fxSub = fxSub; r.raw = raw; r.lt = ltFlag(gFx); r.taxCatUsed = row.taxCat;
+    r.price = price;
+    r.fxSub = fxSub; r.raw = raw; r.lt = isJpy ? "" : ltFlag(gFx); r.taxCatUsed = row.taxCat;
     R[row.id] = r;
     if (row.on){ track(r); trackLt(r.lt);
       acc(row.payVia === "direct" ? cat.guestDirect : cat.guestPartner, r);
@@ -422,20 +445,26 @@ function computeAll(pd){
 
   /* --- ホテル --- */
   cat.hotel = zero();
-  const hotelNights = tripNightsFor(pb) || 0;
-  const hPeople = stayCountFor(pb);
   for (const row of pd.hotels){
-    const fxSub = num(row.rooms) * hotelNights * num(row.fxUnit);
-    const raw = fxCost(gFx, fxSub);
-    const cost = ceilMan(raw);
-    const unitPP = hPeople > 0 && cost > 0 ? Math.ceil(cost / hPeople / 10000) * 10000 : cost;   // 1人あたり(万円単位に切上げ)
-    const sellH = hPeople > 0 && cost > 0 ? unitPP * hPeople : cost;
-    const r = finish(sellH, cost, row.taxCat, tr);   // 売価 = 1人単価 × 宿泊人数(端数分は粗利)
-    r.unitPP = unitPP; r.hPeople = hPeople;
-    r.fxSub = fxSub; r.raw = raw; r.lt = ltFlag(gFx); r.taxCatUsed = row.taxCat;
+    const isJpy = row.rateMode === "jpy";
+    const ppn = num(row.people);
+    let unitPP, costTotal;
+    if (isJpy){
+      unitPP = rnd(num(row.jpyCost));           // 1人あたり円額はそのまま
+      costTotal = unitPP * ppn;
+    } else {
+      const rawPer = fxCost(gFx, num(row.fxUnit));   // 1人あたり外貨額を計算レートで円換算
+      unitPP = ceilMan(rawPer);                       // 1人単価は万円単位に切上げ
+      costTotal = fxCostTTS(gFx, num(row.fxUnit)) * ppn;   // 原価はTTS素レート × 人数
+    }
+    const sellH = unitPP * ppn;
+    const r = finish(sellH, costTotal, row.taxCat, tr);   // 粗利 = 為替上乗せ + 切上げ差額
+    r.unitPP = unitPP; r.hPeople = ppn; r.raw = costTotal;
+    r.fxSub = isJpy ? 0 : num(row.fxUnit);
+    r.lt = isJpy ? "" : ltFlag(gFx); r.taxCatUsed = row.taxCat;
     R[row.id] = r;
-    if (row.on){ track(r); trackLt(r.lt); acc(cat.hotel, r);
-      D("ホテル(" + (row.name || "無名") + ")", r); }
+    if (row.on){ track(r); if (r.lt) trackLt(r.lt); acc(cat.hotel, r);
+      D("宿泊費(" + (row.name || "無名") + ")", r); }
   }
 
   /* --- 航空券 --- */
@@ -544,9 +573,9 @@ function computeAll(pd){
 
   for (const row of pd.hotels){ if (!row.on) continue;
     const rr = R[row.id];
-    L(`ホテル費${row.name ? "(" + row.name + ")" : ""}`, rr, row.taxCat,
+    L(`宿泊費${row.name ? "(" + row.name + ")" : ""}`, rr, row.taxCat,
       { unit: rr.unitPP, qty: rr.hPeople || 1, qtyUnit: "名",
-        note: `${num(row.rooms)}室 × ${hotelNights}泊。1人あたり(万円単位)× 宿泊人数` }); }
+        note: "1人あたり × 人数" + (row.note ? "。" + row.note : "") }); }
   L("航空券", R["flight"], f.taxCat,
     { unit: num(f.unit), qty: fPeople, qtyUnit: "名",
       note: fDirect ? FLIGHT_NOTE : (num(f.unit) ? "" : "単価未入力のため0円(見積に含めない場合は空欄のまま)") });
@@ -808,7 +837,7 @@ function secFx(){
       ${F("見積への含まれ方", sel("fx.ltMode", f.ltMode, [["incl","税込(原価に含まれている)"],["excl","税別(原価に自動加算する)"],["unknown","未確認"]]))}
       ${F("現地税率(%)", ninp("fx.ltRate", f.ltRate))}
     </div>
-    <p class="hint">現地提携先費用(第5章)の円換算は、この共通計算レートと現地税設定を自動で使用します。「税別」を選ぶと外貨小計に現地税を加算してから円換算します。ホテル・ゲストスピーカーは行ごとに個別設定できます。円未満は明細行ごとに四捨五入します。</p>
+    <p class="hint"><strong>売価の算定</strong>は計算レート(TTS×上乗せ率)で円換算して万円単位に切り上げ。<strong>原価はTTS(実勢レート)で換算</strong>するため、計算レートとの差額(為替バッファ)・切り上げ差額・上乗せ額はすべて粗利に計上されます(Excelの粗利計算と同じ方式)。現地税「税別」は外貨額に加算してから換算。円未満は明細行ごとに四捨五入。</p>
     <details class="help"><summary>現地税(GST/VAT)とは — 入力前に確認</summary>
       <p>GST(Goods and Services Tax)やVAT(Value Added Tax)は、海外の消費税に相当する税金です。現地提携先・ホテル・交通機関などの請求額に含まれる(または加算される)ことがあります。</p>
       <ul>
@@ -904,10 +933,12 @@ function secConsult(C){
 /* 円換算原価セル: 万円と「単価×数量」の内訳を併記 */
 function costFormulaCell(r, qty, qtyUnit){
   const q = num(qty);
-  let sub = man(r.cost);
+  const price = r.price != null ? r.price : r.cost;
+  let sub = man(price);
   if (q > 1) sub += ` | ${fmt(rnd(r.raw / q))}円×${q}${qtyUnit}=${fmt(r.raw)}円`;
-  else if (r.raw !== r.cost) sub += ` | 切上げ前 ${fmt(r.raw)}円`;
-  return td(`<div class="comp"><strong>${fmt(r.cost)}</strong>円<div class="man">${sub}</div></div>`);
+  else if (r.raw !== price) sub += ` | 切上げ前 ${fmt(r.raw)}円`;
+  if (r.cost !== price) sub += ` | 原価(TTS) ${fmt(r.cost)}円`;
+  return td(`<div class="comp"><strong>${fmt(price)}</strong>円<div class="man">${sub}</div></div>`);
 }
 
 function partnerTable(C, key, title, qtyCols, opts = {}){
@@ -945,7 +976,7 @@ function secPartner(C){
       ${F("提携先費用 小計(税別売価)", comp(fmt(c.sell + cg.sell)+"円","big"))}
       ${F("うちゲスト/企業訪問(提携先経由)", comp(fmt(cg.sell)+"円"))}
     </div>
-    <p class="hint">円換算は共通設定を自動使用:計算レート <strong>${commonRate().toFixed(4)}</strong> / 現地税 <strong>${esc(S.fx.ltType)} ${num(S.fx.ltRate)}%(${S.fx.ltMode==="incl"?"税込":S.fx.ltMode==="excl"?"税別・原価に加算":"未確認"})</strong>。円換算原価は万円単位に切り上げ、<strong>売価 = 円換算原価 + 上乗せ額</strong>(上乗せ額がそのまま粗利)。freee転記では「現地提携先プログラム費」に合算されます。</p>
+    <p class="hint">円換算は共通設定を自動使用:計算レート <strong>${commonRate().toFixed(4)}</strong> / 現地税 <strong>${esc(S.fx.ltType)} ${num(S.fx.ltRate)}%(${S.fx.ltMode==="incl"?"税込":S.fx.ltMode==="excl"?"税別・原価に加算":"未確認"})</strong>。円換算原価は万円単位に切り上げ、<strong>売価 = 円換算額 + 上乗せ額</strong>。原価はTTS素レート(${num(S.fx.tts)})で計上するため、粗利 = 上乗せ額 + 為替上乗せ分 + 切上げ差額になります。freee転記では「海外プログラム費用」に合算されます。</p>
     ${partnerTable(C,"program","5-1. プログラム費用・会場費",[["qty","数量"],["desc","内容/単位"]],
         { qtyOf: r => num(r.qty), qtyUnit: "" })}
     ${partnerTable(C,"party","5-2. 懇親会",[["people","対象人数(参考)"]],
@@ -1047,25 +1078,25 @@ function secHotel(C){
   const rows = activePat().data.hotels;
   const body = rows.map((row,i) => { const bp = `pat.hotels.${i}`, r = C.R[row.id];
     return `<tr class="${row.on?"":"off"}">${td(onSw(bp+".on",row.on))}
-      ${td(inp(bp+".name",row.name,"w-l","ホテル名") + inp(bp+".city",row.city,"w-m","都市"))}
-      ${td(inp(bp+".roomType",row.roomType,"w-s","部屋タイプ"))}
-      ${td(comp(fmt(stayCount())+"名"))}${td(comp((tripNights() != null ? tripNights() : "—")+"泊"))}${td(ninp(bp+".rooms",row.rooms,"w-s"))}
-      ${td(ninp(bp+".fxUnit",row.fxUnit))}
-      ${td(comp(r.fxSub.toLocaleString("ja-JP",{maximumFractionDigits:2})))}
-      ${td(`<div class="comp"><strong>${fmt(r.sell)}</strong>円<div class="man">${man(r.sell)} | 1人 ${fmt(r.unitPP)}円 × ${r.hPeople}名 | 原価 ${fmt(r.cost)}円(切上げ前 ${fmt(r.raw)}円)</div></div>`)}
-      ${td(sel(bp+".breakfast",row.breakfast,["込み","別","不明"],"w-s"))}
-      ${td(sel(bp+".taxSvc",row.taxSvc,["込み","別","不明"],"w-s"))}
-      ${td(taxSel(bp+".taxCat",row.taxCat))}${td(inp(bp+".note",row.note,"w-m"))}
+      ${td(inp(bp+".name",row.name,"w-l","対象(例:参加者・先方事務局)"))}
+      ${td(sel(bp+".rateMode",row.rateMode,[["common","外貨(共通レート)"],["jpy","円建て"]],"w-m"))}
+      ${row.rateMode === "jpy"
+        ? td(ninp(bp+".jpyCost",row.jpyCost)) + td("")
+        : td("") + td(ninp(bp+".fxUnit",row.fxUnit))}
+      ${td(comp(fmt(r.unitPP)+"円"))}
+      ${td(ninp(bp+".people",row.people,"w-s"))}
+      ${td(`<div class="comp"><strong>${fmt(r.sell)}</strong>円<div class="man">${man(r.sell)}${!row.rateMode || row.rateMode !== "jpy" ? " | 原価 " + fmt(r.cost) + "円" : ""}</div></div>`)}
+      ${td(taxSel(bp+".taxCat",row.taxCat))}
+      ${td(inp(bp+".note",row.note,"w-l","内訳(例:Stanly Ranch $1500・Holiday Inn $250 等)"))}
       ${td(delBtn("hotels",row.id))}</tr>`; }).join("");
-  return `<section class="card" id="sec-hotel">${secH(9,"ホテル費用")}
+  return `<section class="card" id="sec-hotel">${secH(9,"ホテル費用(宿泊グループ)")}
   <div class="body">
-    <p class="hint">宿泊対象人数(${fmt(stayCount())}名)と宿泊数(${tripNights() != null ? tripNights() + "泊" : "日程未入力"})は基本情報から自動反映。外貨小計 = 部屋数 × 宿泊数 × 1泊1室単価。${tripNights() == null ? '<strong style="color:#b3261e">渡航開始日・終了日を入力すると宿泊数が計算されます。</strong>' : ""}</p>
+    <p class="hint">宿泊者のグループごとに行を分けて入力します(例:「参加者・先方事務局」81万円×4名、「GEアテンド」24万円×1名)。1人あたり金額は「外貨(共通レート換算・万円切上げ)」か「円建て(そのまま)」を選べます。合計 = 1人単価 × 人数。参考:基本情報の宿泊人数 ${fmt(stayCount())}名 / 宿泊数 ${tripNights() != null ? tripNights() + "泊" : "未入力"}。複数ホテルの組み合わせは内訳欄にメモしてください。</p>
     <div class="tw"><table class="tbl">
-      <tr><th></th><th>ホテル名/都市</th><th>部屋タイプ</th><th>宿泊対象人数(自動)</th><th>宿泊数(自動)</th><th>部屋数</th>
-      <th>1泊1室 外貨単価(${esc(S.fx.currency)})</th><th>外貨小計</th>
-      <th>円換算原価=売価(自動・万切上げ)</th><th>朝食</th><th>税サ</th><th>課税区分</th><th>備考</th><th></th></tr>
+      <tr><th></th><th>対象(グループ名)</th><th>建て</th><th>1人あたり円建て</th><th>1人あたり外貨(${esc(S.fx.currency)})</th>
+      <th>1人単価(円・自動)</th><th>人数</th><th>合計=売価(自動)</th><th>課税区分</th><th>内訳・備考</th><th></th></tr>
       ${body}
-    </table></div>${addBtn("hotels","ホテルを追加")}
+    </table></div>${addBtn("hotels","宿泊グループを追加")}
   </div></section>`;
 }
 
@@ -1313,8 +1344,8 @@ const ROW_TPL = {
   "partner.other": () => Object.assign({ id:uid(), name:"", desc:"", qty:"1", fxUnit:"", markup:"0", taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
   "guests": () => Object.assign({ id:uid(), on:true, type:"ゲストスピーカー", name:"", content:"", date:"", hours:"1", days:"1",
       payVia:"partner", qty:"1", fxUnit:"", markup:"0", taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
-  "hotels": () => Object.assign({ id:uid(), on:true, name:"", city:"", roomType:"", people:String(stayCount()), nights:"", rooms:String(stayCount()),
-      fxUnit:"", sell:"", breakfast:"不明", taxSvc:"不明", cancel:"", taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
+  "hotels": () => Object.assign({ id:uid(), on:true, name:"", people:String(stayCount()), fxUnit:"",
+      jpyCost:"", perPerson:true, taxCat:"不課税", note:"" }, fxBlock(S.fx.currency)),
   "others": () => ({ id:uid(), name:"", sell:"", cost:"0", taxCat:"課税", note:"" }),
   "al": () => ({ id:uid(), person:"", days:"", unit:"", cost:"", taxCat:"課税", note:"" }),
   "ad": () => ({ id:uid(), person:"", days:"", unit:"", cost:"", taxCat:"課税", note:"" })
