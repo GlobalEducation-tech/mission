@@ -330,7 +330,7 @@ function computeAll(pd){
   for (const row of pd.pre.rows){
     const mat = num(row.matUnit) * ppl;             // 教材費 = 単価 × 参加者数(粗利なし)
     const base = num(row.sell) + mat;
-    const sell = base > 0 ? Math.ceil(base / 100000) * 100000 : 0;   // 10万円単位に切り上げ(交通費等込み)
+    const sell = base > 0 ? Math.ceil(base / 100000) * 100000 : rnd(base);   // 10万円単位に切り上げ。マイナス(割引)は入力額のまま
     const gp = row.gpIn != null ? num(row.gpIn) : num(row.sell) - num(row.cost);
     const r = finish(sell, sell - gp, row.taxCat, tr);
     r.mat = mat; r.base = base;
@@ -868,7 +868,7 @@ function secPre(C){
       ${td(inp(`pat.pre.${key}.note`, it.note,"w-l"))}<td></td></tr>`; };
   const rows = pre.rows.map((row,i) => { const bp = `pat.pre.rows.${i}`, r = C.R[row.id];
     return `<tr>${td("")}${td(inp(bp+".name",row.name,"w-l","研修名") + inp(bp+".lecturer",row.lecturer,"w-m","講師名"))}
-      ${td(ninp(bp+".sell",row.sell) + `<div class="man">確定 ${fmt(r.sell)}円(10万切上げ)</div>`)}${td(comp(fmt(r.cost)))}
+      ${td(ninp(bp+".sell",row.sell) + `<div class="man">確定 ${fmt(r.sell)}円${r.sell >= 0 ? "(10万切上げ)" : "(割引・切上げなし)"}</div>`)}${td(comp(fmt(r.cost)))}
       ${td(ninp(bp+".gpIn",row.gpIn))}${td(comp(pct(r.gpRate), gpCls(r.gpRate)))}${td(taxSel(bp+".taxCat",row.taxCat))}
       ${td(ninp(bp+".matUnit",row.matUnit,"w-s") + `<div class="man">合計 ${fmt(r.mat||0)}円(×${num(patBasic().participants)}名・粗利なし)</div>`)}
       ${td(`<span class="man">回数</span>`+ninp(bp+".times",row.times,"w-s")
